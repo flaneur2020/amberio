@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub node: NodeConfig,
-    pub etcd: EtcdConfig,
+    pub registry: RegistryConfig,
     pub archive: Option<ArchiveConfig>,
     pub replication: ReplicationConfig,
 }
@@ -22,9 +22,35 @@ pub struct DiskConfig {
     pub path: PathBuf,
 }
 
+/// Registry backend configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryConfig {
+    pub backend: RegistryBackend,
+    pub etcd: Option<EtcdConfig>,
+    pub redis: Option<RedisConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegistryBackend {
+    Etcd,
+    Redis,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EtcdConfig {
     pub endpoints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisConfig {
+    pub url: String,
+    #[serde(default = "default_redis_pool_size")]
+    pub pool_size: usize,
+}
+
+fn default_redis_pool_size() -> usize {
+    10
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

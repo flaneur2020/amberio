@@ -4,6 +4,7 @@
 //! (etcd, Redis, etc.)
 
 pub mod etcd;
+pub mod redis;
 
 use crate::error::Result;
 use crate::node::NodeInfo;

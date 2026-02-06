@@ -4,7 +4,7 @@ use amberblob_core::{
     SlotManager, SlotInfo, SlotHealth, ReplicaStatus, slot_for_key, TOTAL_SLOTS, CHUNK_SIZE,
     ChunkStore, compute_hash,
     MetadataStore, ObjectMeta, ChunkInfo,
-    EtcdRegistry, Registry,
+    EtcdRegistry, RedisRegistry, Registry, RegistryBackend,
     TwoPhaseCommit, TwoPhaseParticipant, Vote,
 };
 use axum::{
@@ -99,8 +99,19 @@ pub async fn run_server(config: Config) -> Result<()> {
     let chunk_base = data_dir.join("chunks");
     let chunk_store = Arc::new(ChunkStore::new(chunk_base)?);
 
-    // Connect to registry (etcd)
-    let registry: Arc<dyn Registry> = Arc::new(EtcdRegistry::new(&config.etcd, &node_config.group_id).await?);
+    // Connect to registry (etcd or redis)
+    let registry: Arc<dyn Registry> = match config.registry.backend {
+        RegistryBackend::Etcd => {
+            let etcd_config = config.registry.etcd.as_ref()
+                .ok_or_else(|| AmberError::Config("etcd configuration is required for etcd backend".to_string()))?;
+            Arc::new(EtcdRegistry::new(etcd_config, &node_config.group_id).await?)
+        }
+        RegistryBackend::Redis => {
+            let redis_config = config.registry.redis.as_ref()
+                .ok_or_else(|| AmberError::Config("redis configuration is required for redis backend".to_string()))?;
+            Arc::new(RedisRegistry::new(redis_config, &node_config.group_id).await?)
+        }
+    };
 
     // Initialize 2PC
     let twopc_coordinator = Arc::new(TwoPhaseCommit::new(node_config.node_id.clone()));
