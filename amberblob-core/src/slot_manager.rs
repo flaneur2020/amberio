@@ -57,7 +57,7 @@ impl SlotManager {
     }
 
     pub async fn init_slot(&self, slot_id: u16) -> Result<()> {
-        let slot_path = self.data_dir.join(format!("slot_{:04}", slot_id));
+        let slot_path = self.data_dir.join(format!("slot_{:08}", slot_id));
         std::fs::create_dir_all(&slot_path)?;
         std::fs::create_dir_all(slot_path.join("chunks"))?;
         std::fs::create_dir_all(slot_path.join("meta"))?;
@@ -79,11 +79,13 @@ impl SlotManager {
         let slots = self.slots.read().await;
         slots
             .get(&slot_id)
-            .map(|s| Arc::new(Slot {
-                slot_id: s.slot_id,
-                seq: Arc::clone(&s.seq),
-                data_path: s.data_path.clone(),
-            }))
+            .map(|s| {
+                Arc::new(Slot {
+                    slot_id: s.slot_id,
+                    seq: Arc::clone(&s.seq),
+                    data_path: s.data_path.clone(),
+                })
+            })
             .ok_or_else(|| AmberError::SlotNotFound(slot_id))
     }
 

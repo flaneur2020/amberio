@@ -1,5 +1,5 @@
 use crate::error::{AmberError, Result};
-use crate::metadata_store::ObjectMeta;
+use crate::storage::ObjectMeta;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;

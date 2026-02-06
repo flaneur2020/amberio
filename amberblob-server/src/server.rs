@@ -4,7 +4,7 @@ use amberblob_core::{
     SlotManager, SlotInfo, SlotHealth, ReplicaStatus, slot_for_key, TOTAL_SLOTS, CHUNK_SIZE,
     ChunkStore, compute_hash,
     MetadataStore, ObjectMeta, ChunkInfo,
-    EtcdStore,
+    EtcdRegistry, Registry,
     TwoPhaseCommit, TwoPhaseParticipant, Vote,
 };
 use axum::{
@@ -23,7 +23,7 @@ pub struct ServerState {
     pub node: Arc<Node>,
     pub slot_manager: Arc<SlotManager>,
     pub chunk_store: Arc<ChunkStore>,
-    pub etcd: Arc<EtcdStore>,
+    pub registry: Arc<dyn Registry>,
     pub twopc_coordinator: Arc<TwoPhaseCommit>,
     pub twopc_participant: Arc<TwoPhaseParticipant>,
     pub config: Config,
@@ -99,8 +99,8 @@ pub async fn run_server(config: Config) -> Result<()> {
     let chunk_base = data_dir.join("chunks");
     let chunk_store = Arc::new(ChunkStore::new(chunk_base)?);
 
-    // Connect to etcd
-    let etcd = Arc::new(EtcdStore::new(&config.etcd, &node_config.group_id).await?);
+    // Connect to registry (etcd)
+    let registry: Arc<dyn Registry> = Arc::new(EtcdRegistry::new(&config.etcd, &node_config.group_id).await?);
 
     // Initialize 2PC
     let twopc_coordinator = Arc::new(TwoPhaseCommit::new(node_config.node_id.clone()));
@@ -110,15 +110,15 @@ pub async fn run_server(config: Config) -> Result<()> {
         node: node.clone(),
         slot_manager,
         chunk_store,
-        etcd,
+        registry: registry.clone(),
         twopc_coordinator,
         twopc_participant,
         config,
     });
 
-    // Register node in etcd
+    // Register node in registry
     let node_info = node.info().await;
-    state.etcd.register_node(&node_info).await?;
+    registry.register_node(&node_info).await?;
 
     // Assign slots (simplified - in production this would come from a bootstrap process)
     assign_slots(&state).await?;
@@ -148,7 +148,7 @@ pub async fn run_server(config: Config) -> Result<()> {
 
 async fn assign_slots(state: &Arc<ServerState>) -> Result<()> {
     // Get all nodes and determine slot assignment
-    let nodes = state.etcd.get_nodes().await?;
+    let nodes = state.registry.get_nodes().await?;
 
     // Simple assignment: divide slots evenly among nodes
     let node_count = nodes.len().max(1);
@@ -203,7 +203,7 @@ async fn health_check_loop(state: Arc<ServerState>) {
                 last_updated: chrono::Utc::now(),
             };
 
-            if let Err(e) = state.etcd.report_health(&health).await {
+            if let Err(e) = state.registry.report_health(&health).await {
                 tracing::warn!("Failed to report health for slot {}: {}", slot_id, e);
             }
         }
@@ -330,7 +330,7 @@ async fn proxy_to_replica(
     path: &str,
 ) -> Result<Response> {
     // Get healthy replicas from etcd
-    let replicas = state.etcd.get_healthy_replicas(slot_id).await?;
+    let replicas = state.registry.get_healthy_replicas(slot_id).await?;
 
     if replicas.is_empty() {
         return Err(AmberError::InsufficientReplicas {
@@ -343,7 +343,7 @@ async fn proxy_to_replica(
     let target_node = &replicas[0].0;
 
     // Get node info to find address
-    let nodes = state.etcd.get_nodes().await?;
+    let nodes = state.registry.get_nodes().await?;
     let target = nodes
         .into_iter()
         .find(|n| &n.node_id == target_node)
@@ -377,7 +377,7 @@ async fn put_object(
     let slot_id = slot_for_key(&path, TOTAL_SLOTS);
 
     // Get healthy replicas
-    let replicas = match state.etcd.get_healthy_replicas(slot_id).await {
+    let replicas = match state.registry.get_healthy_replicas(slot_id).await {
         Ok(r) => r,
         Err(e) => {
             let resp = ApiResponse::<()> {
@@ -655,7 +655,7 @@ async fn get_slot_info(
     State(state): State<Arc<ServerState>>,
     Path(slot_id): Path<u16>,
 ) -> impl IntoResponse {
-    match state.etcd.get_slot(slot_id).await {
+    match state.registry.get_slot(slot_id).await {
         Ok(Some(info)) => {
             let resp: ApiResponse<SlotInfo> = ApiResponse {
                 success: true,
@@ -684,7 +684,7 @@ async fn get_slot_info(
 }
 
 async fn list_nodes(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    match state.etcd.get_nodes().await {
+    match state.registry.get_nodes().await {
         Ok(nodes) => {
             let resp: ApiResponse<Vec<NodeInfo>> = ApiResponse {
                 success: true,

@@ -6,20 +6,19 @@
 //! - SHA256 content-addressed chunks
 //! - SQLite for local metadata
 
-pub mod chunk_store;
 pub mod config;
 pub mod error;
-pub mod etcd_store;
-pub mod metadata_store;
 pub mod node;
+pub mod registry;
 pub mod slot_manager;
+pub mod storage;
 pub mod two_phase_commit;
 
-pub use chunk_store::{ChunkStore, compute_hash, verify_hash};
 pub use config::{Config, NodeConfig, EtcdConfig, DiskConfig, ReplicationConfig, ArchiveConfig, S3Config};
 pub use error::{AmberError, Result};
-pub use etcd_store::{EtcdStore, SlotEvent};
-pub use metadata_store::{MetadataStore, ObjectMeta, ChunkInfo};
 pub use node::{Node, NodeInfo, NodeStatus};
+pub use registry::{Registry, DynRegistry, SlotEvent};
+pub use registry::etcd::EtcdRegistry;
 pub use slot_manager::{SlotManager, Slot, SlotInfo, SlotHealth, ReplicaStatus, slot_for_key, TOTAL_SLOTS, CHUNK_SIZE};
+pub use storage::{ChunkStore, MetadataStore, ObjectMeta, ChunkInfo, compute_hash, verify_hash};
 pub use two_phase_commit::{TwoPhaseCommit, TwoPhaseParticipant, Transaction, TransactionState, Vote};

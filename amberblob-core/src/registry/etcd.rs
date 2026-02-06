@@ -1,16 +1,20 @@
 use crate::config::EtcdConfig;
 use crate::error::Result;
 use crate::node::NodeInfo;
+use crate::registry::{Registry, SlotEvent};
 use crate::slot_manager::{ReplicaStatus, SlotHealth, SlotInfo};
+use async_trait::async_trait;
 use etcd_client::{Client, GetOptions, PutOptions};
 use std::collections::HashMap;
 
-pub struct EtcdStore {
+/// etcd-based registry implementation
+pub struct EtcdRegistry {
     client: Client,
     prefix: String,
 }
 
-impl EtcdStore {
+impl EtcdRegistry {
+    /// Create a new etcd registry client
     pub async fn new(config: &EtcdConfig, group_id: &str) -> Result<Self> {
         let client = Client::connect(&config.endpoints, None).await?;
         let prefix = format!("/amberblob/{}", group_id);
@@ -30,8 +34,21 @@ impl EtcdStore {
         format!("{}/health/{}/{}", self.prefix, slot_id, node_id)
     }
 
-    /// Register node in etcd
-    pub async fn register_node(&self, node: &NodeInfo) -> Result<()> {
+    /// Watch for slot changes (simplified - just fetches periodically)
+    pub async fn watch_slots(&self) -> Result<tokio::sync::mpsc::Receiver<SlotEvent>> {
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+        // In a full implementation, this would use etcd watch API
+        // For now, we just return the receiver
+        let _ = tx; // Suppress unused warning
+
+        Ok(rx)
+    }
+}
+
+#[async_trait]
+impl Registry for EtcdRegistry {
+    async fn register_node(&self, node: &NodeInfo) -> Result<()> {
         let key = self.node_key(&node.node_id);
         let value = serde_json::to_vec(node)?;
 
@@ -43,8 +60,7 @@ impl EtcdStore {
         Ok(())
     }
 
-    /// Get slot routing information
-    pub async fn get_slot(&self, slot_id: u16) -> Result<Option<SlotInfo>> {
+    async fn get_slot(&self, slot_id: u16) -> Result<Option<SlotInfo>> {
         let key = self.slot_key(slot_id);
         let mut client = self.client.clone();
         let resp = client.get(key, None).await?;
@@ -57,8 +73,7 @@ impl EtcdStore {
         }
     }
 
-    /// Set slot routing information
-    pub async fn set_slot(&self, info: &SlotInfo) -> Result<()> {
+    async fn set_slot(&self, info: &SlotInfo) -> Result<()> {
         let key = self.slot_key(info.slot_id);
         let value = serde_json::to_vec(info)?;
 
@@ -68,8 +83,7 @@ impl EtcdStore {
         Ok(())
     }
 
-    /// Get all slot routing information
-    pub async fn get_all_slots(&self) -> Result<HashMap<u16, SlotInfo>> {
+    async fn get_all_slots(&self) -> Result<HashMap<u16, SlotInfo>> {
         let prefix = format!("{}/slots/", self.prefix);
         let mut client = self.client.clone();
         let resp = client
@@ -86,8 +100,7 @@ impl EtcdStore {
         Ok(slots)
     }
 
-    /// Report slot health status
-    pub async fn report_health(&self, health: &SlotHealth) -> Result<()> {
+    async fn report_health(&self, health: &SlotHealth) -> Result<()> {
         let key = self.health_key(health.slot_id, &health.node_id);
         let value = serde_json::to_vec(health)?;
 
@@ -97,8 +110,7 @@ impl EtcdStore {
         Ok(())
     }
 
-    /// Get health status for all replicas of a slot
-    pub async fn get_slot_health(&self, slot_id: u16) -> Result<Vec<SlotHealth>> {
+    async fn get_slot_health(&self, slot_id: u16) -> Result<Vec<SlotHealth>> {
         let prefix = format!("{}/health/{}/", self.prefix, slot_id);
         let mut client = self.client.clone();
         let resp = client
@@ -115,8 +127,7 @@ impl EtcdStore {
         Ok(healths)
     }
 
-    /// Get healthy replicas with latest seq for a slot
-    pub async fn get_healthy_replicas(&self, slot_id: u16) -> Result<Vec<(String, String)>> {
+    async fn get_healthy_replicas(&self, slot_id: u16) -> Result<Vec<(String, String)>> {
         let healths = self.get_slot_health(slot_id).await?;
 
         let healthy: Vec<(String, String)> = healths
@@ -145,8 +156,7 @@ impl EtcdStore {
         Ok(latest_healthy)
     }
 
-    /// Get all nodes in the group
-    pub async fn get_nodes(&self) -> Result<Vec<NodeInfo>> {
+    async fn get_nodes(&self) -> Result<Vec<NodeInfo>> {
         let prefix = format!("{}/nodes/", self.prefix);
         let mut client = self.client.clone();
         let resp = client
@@ -162,21 +172,4 @@ impl EtcdStore {
 
         Ok(nodes)
     }
-
-    /// Watch for slot changes (simplified - just fetches periodically)
-    pub async fn watch_slots(&self) -> Result<tokio::sync::mpsc::Receiver<SlotEvent>> {
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
-
-        // In a full implementation, this would use etcd watch API
-        // For now, we just return the receiver
-        let _ = tx; // Suppress unused warning
-
-        Ok(rx)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum SlotEvent {
-    Updated(SlotInfo),
-    Deleted(u16),
 }
