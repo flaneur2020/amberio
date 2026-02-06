@@ -1,8 +1,10 @@
-use amberblob::config::Config;
-use amberblob::server::run_server;
+use amberblob_core::Config;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+mod server;
+use server::run_server;
 
 #[derive(Parser)]
 #[command(name = "amberblob")]

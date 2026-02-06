@@ -63,9 +63,9 @@ impl Default for ReplicationConfig {
 
 impl Config {
     pub fn from_file(path: &str) -> crate::error::Result<Self> {
-        let settings = config::Config::builder()
-            .add_source(config::File::with_name(path))
-            .add_source(config::Environment::with_prefix("AMBERBLOB"))
+        let settings = ::config::Config::builder()
+            .add_source(::config::File::with_name(path))
+            .add_source(::config::Environment::with_prefix("AMBERBLOB"))
             .build()
             .map_err(|e| crate::error::AmberError::Config(e.to_string()))?;
 

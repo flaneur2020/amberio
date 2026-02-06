@@ -1,11 +1,12 @@
-use crate::config::Config;
-use crate::error::AmberError;
-use crate::node::Node;
-use crate::slot_manager::{slot_for_key, SlotManager, ReplicaStatus, SlotHealth, CHUNK_SIZE, TOTAL_SLOTS};
-use crate::chunk_store::{ChunkStore, compute_hash};
-use crate::metadata_store::{MetadataStore, ObjectMeta, ChunkInfo};
-use crate::etcd_store::EtcdStore;
-use crate::two_phase_commit::{TwoPhaseCommit, TwoPhaseParticipant, Vote};
+use amberblob_core::{
+    Config, AmberError, Result,
+    Node, NodeInfo,
+    SlotManager, SlotInfo, SlotHealth, ReplicaStatus, slot_for_key, TOTAL_SLOTS, CHUNK_SIZE,
+    ChunkStore, compute_hash,
+    MetadataStore, ObjectMeta, ChunkInfo,
+    EtcdStore,
+    TwoPhaseCommit, TwoPhaseParticipant, Vote,
+};
 use axum::{
     body::Bytes,
     extract::{Path, State, Query},
@@ -19,13 +20,13 @@ use std::sync::Arc;
 use ulid::Ulid;
 
 pub struct ServerState {
-    node: Arc<Node>,
-    slot_manager: Arc<SlotManager>,
-    chunk_store: Arc<ChunkStore>,
-    etcd: Arc<EtcdStore>,
-    twopc_coordinator: Arc<TwoPhaseCommit>,
-    twopc_participant: Arc<TwoPhaseParticipant>,
-    config: Config,
+    pub node: Arc<Node>,
+    pub slot_manager: Arc<SlotManager>,
+    pub chunk_store: Arc<ChunkStore>,
+    pub etcd: Arc<EtcdStore>,
+    pub twopc_coordinator: Arc<TwoPhaseCommit>,
+    pub twopc_participant: Arc<TwoPhaseParticipant>,
+    pub config: Config,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,7 +77,7 @@ fn default_limit() -> usize {
     100
 }
 
-pub async fn run_server(config: Config) -> crate::error::Result<()> {
+pub async fn run_server(config: Config) -> Result<()> {
     let node_config = config.node.clone();
     let node = Arc::new(Node::new(
         node_config.clone(),
@@ -145,7 +146,7 @@ pub async fn run_server(config: Config) -> crate::error::Result<()> {
     Ok(())
 }
 
-async fn assign_slots(state: &Arc<ServerState>) -> crate::error::Result<()> {
+async fn assign_slots(state: &Arc<ServerState>) -> Result<()> {
     // Get all nodes and determine slot assignment
     let nodes = state.etcd.get_nodes().await?;
 
@@ -281,7 +282,7 @@ async fn get_object_local(
     state: &Arc<ServerState>,
     path: &str,
     slot_id: u16,
-) -> crate::error::Result<ObjectMeta> {
+) -> Result<ObjectMeta> {
     let slot = state.slot_manager.get_slot(slot_id).await?;
     let store = MetadataStore::new(slot)?;
 
@@ -295,7 +296,7 @@ async fn stream_object(
     meta: &ObjectMeta,
     start: usize,
     end: usize,
-) -> crate::error::Result<Vec<u8>> {
+) -> Result<Vec<u8>> {
     let mut result = Vec::new();
     let mut current_pos = 0usize;
 
@@ -327,7 +328,7 @@ async fn proxy_to_replica(
     state: &Arc<ServerState>,
     slot_id: u16,
     path: &str,
-) -> crate::error::Result<Response> {
+) -> Result<Response> {
     // Get healthy replicas from etcd
     let replicas = state.etcd.get_healthy_replicas(slot_id).await?;
 
@@ -460,7 +461,7 @@ async fn put_object(
 async fn store_chunks(
     state: &Arc<ServerState>,
     data: &Bytes,
-) -> crate::error::Result<Vec<ChunkInfo>> {
+) -> Result<Vec<ChunkInfo>> {
     let mut chunks = Vec::new();
     let mut offset = 0u64;
 
@@ -488,7 +489,7 @@ async fn perform_2pc(
     participants: Vec<String>,
     slot_id: u16,
     meta: ObjectMeta,
-) -> crate::error::Result<()> {
+) -> Result<()> {
     let tx_id = state
         .twopc_coordinator
         .begin_transaction(participants.clone(), slot_id, meta.clone())
@@ -656,7 +657,7 @@ async fn get_slot_info(
 ) -> impl IntoResponse {
     match state.etcd.get_slot(slot_id).await {
         Ok(Some(info)) => {
-            let resp: ApiResponse<crate::slot_manager::SlotInfo> = ApiResponse {
+            let resp: ApiResponse<SlotInfo> = ApiResponse {
                 success: true,
                 data: Some(info),
                 error: None,
@@ -685,7 +686,7 @@ async fn get_slot_info(
 async fn list_nodes(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     match state.etcd.get_nodes().await {
         Ok(nodes) => {
-            let resp: ApiResponse<Vec<crate::node::NodeInfo>> = ApiResponse {
+            let resp: ApiResponse<Vec<NodeInfo>> = ApiResponse {
                 success: true,
                 data: Some(nodes),
                 error: None,
