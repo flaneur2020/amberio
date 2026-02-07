@@ -57,10 +57,10 @@ impl SlotManager {
     }
 
     pub async fn init_slot(&self, slot_id: u16) -> Result<()> {
-        let slot_path = self.data_dir.join(format!("slot_{:08}", slot_id));
+        // Use RFC-compliant directory structure: slots/<slot_id>/
+        let slot_path = self.data_dir.join("slots").join(format!("{}", slot_id));
         std::fs::create_dir_all(&slot_path)?;
-        std::fs::create_dir_all(slot_path.join("chunks"))?;
-        std::fs::create_dir_all(slot_path.join("meta"))?;
+        std::fs::create_dir_all(slot_path.join("blobs"))?;
 
         let slot = Slot {
             slot_id,
@@ -123,12 +123,18 @@ impl SlotManager {
 }
 
 impl Slot {
-    pub fn chunk_path(&self, chunk_hash: &str) -> PathBuf {
-        self.data_path.join("chunks").join(chunk_hash)
+    pub fn chunk_path(&self, blob_id: &str, chunk_id: &str) -> PathBuf {
+        // RFC structure: blobs/{blob_id}/chunks/{chunk_id}
+        self.data_path.join("blobs").join(blob_id).join("chunks").join(chunk_id)
     }
 
     pub fn meta_db_path(&self) -> PathBuf {
-        self.data_path.join("meta").join("metadata.db")
+        // RFC structure: meta.sqlite3 (in slot directory)
+        self.data_path.join("meta.sqlite3")
+    }
+
+    pub fn blobs_dir(&self) -> PathBuf {
+        self.data_path.join("blobs")
     }
 }
 

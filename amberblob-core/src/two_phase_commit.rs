@@ -1,5 +1,5 @@
 use crate::error::{AmberError, Result};
-use crate::storage::ObjectMeta;
+use crate::storage::BlobMeta;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,7 +23,7 @@ pub struct Transaction {
     pub state: TransactionState,
     pub participants: Vec<String>, // node_ids
     pub slot_id: u16,
-    pub object_meta: ObjectMeta,
+    pub blob_meta: BlobMeta,
     pub votes: HashMap<String, Vote>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -53,7 +53,7 @@ impl TwoPhaseCommit {
         &self,
         participants: Vec<String>,
         slot_id: u16,
-        object_meta: ObjectMeta,
+        blob_meta: BlobMeta,
     ) -> Result<String> {
         let tx_id = Ulid::new().to_string();
 
@@ -62,7 +62,7 @@ impl TwoPhaseCommit {
             state: TransactionState::Preparing,
             participants: participants.clone(),
             slot_id,
-            object_meta,
+            blob_meta,
             votes: HashMap::new(),
             created_at: chrono::Utc::now(),
         };
@@ -201,7 +201,7 @@ impl TwoPhaseParticipant {
     /// Prepare phase - validate and vote
     pub async fn prepare(&self, _tx: &Transaction) -> Result<Vote> {
         // In a real implementation, this would:
-        // 1. Validate the object metadata
+        // 1. Validate the blob metadata
         // 2. Check if all chunks are available
         // 3. Write prepare record to local WAL
         // 4. Return Yes if all checks pass
@@ -217,10 +217,11 @@ impl TwoPhaseParticipant {
         // 3. Clean up prepare record
 
         tracing::info!(
-            "Participant {} committing transaction {} for object {}",
+            "Participant {} committing transaction {} for blob {} (version {})",
             self.node_id,
             tx.tx_id,
-            tx.object_meta.path
+            tx.blob_meta.path,
+            tx.blob_meta.version
         );
 
         Ok(())
@@ -233,10 +234,11 @@ impl TwoPhaseParticipant {
         // 2. Clean up prepare record
 
         tracing::info!(
-            "Participant {} aborting transaction {} for object {}",
+            "Participant {} aborting transaction {} for blob {} (version {})",
             self.node_id,
             tx.tx_id,
-            tx.object_meta.path
+            tx.blob_meta.path,
+            tx.blob_meta.version
         );
 
         Ok(())

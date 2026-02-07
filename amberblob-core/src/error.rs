@@ -25,6 +25,9 @@ pub enum AmberError {
     #[error("Object not found: {0}")]
     ObjectNotFound(String),
 
+    #[error("Blob not found: {0}")]
+    BlobNotFound(String),
+
     #[error("Insufficient replicas: need {required}, found {found}")]
     InsufficientReplicas { required: usize, found: usize },
 

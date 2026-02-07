@@ -4,7 +4,7 @@ use amberblob_core::{
     Node, NodeInfo,
     SlotManager, SlotInfo, SlotHealth, ReplicaStatus, slot_for_key, TOTAL_SLOTS, CHUNK_SIZE,
     ChunkStore, compute_hash,
-    MetadataStore, ObjectMeta, ChunkInfo,
+    MetadataStore, BlobMeta, ChunkRef,
     EtcdRegistry, RedisRegistry, Registry,
     TwoPhaseCommit, TwoPhaseParticipant, Vote,
 };
@@ -40,6 +40,8 @@ struct ApiResponse<T> {
 #[derive(Debug, Deserialize)]
 struct GetObjectQuery {
     #[serde(default)]
+    version: Option<i64>,
+    #[serde(default)]
     start: Option<u64>,
     #[serde(default)]
     end: Option<u64>,
@@ -48,17 +50,19 @@ struct GetObjectQuery {
 #[derive(Debug, Serialize)]
 struct ObjectResponse {
     path: String,
+    version: i64,
+    blob_id: String,
     size: u64,
-    chunks: Vec<ChunkInfo>,
-    seq: String,
+    chunks: Vec<ChunkRef>,
     created_at: String,
-    modified_at: String,
+    tombstoned_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct WriteResponse {
     path: String,
-    seq: String,
+    version: i64,
+    blob_id: String,
     chunks_stored: usize,
 }
 
@@ -68,6 +72,14 @@ struct ListQuery {
     prefix: String,
     #[serde(default = "default_limit")]
     limit: usize,
+    #[serde(default)]
+    include_tombstoned: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PutObjectQuery {
+    #[serde(default)]
+    version: Option<i64>,
 }
 
 fn default_prefix() -> String {
@@ -93,7 +105,7 @@ pub async fn run_server(config: Config) -> Result<()> {
 
     // Initialize slot manager with first disk
     let data_dir = if !node_config.disks.is_empty() {
-        node_config.disks[0].path.join("amberblob")
+        node_config.disks[0].path.clone()
     } else {
         std::path::PathBuf::from("/tmp/amberblob")
     };
@@ -102,9 +114,8 @@ pub async fn run_server(config: Config) -> Result<()> {
         data_dir.clone(),
     )?);
 
-    // Initialize chunk store
-    let chunk_base = data_dir.join("chunks");
-    let chunk_store = Arc::new(ChunkStore::new(chunk_base)?);
+    // Initialize chunk store at data directory
+    let chunk_store = Arc::new(ChunkStore::new(data_dir)?);
 
     // Connect to registry (etcd or redis)
     let registry: Arc<dyn Registry> = match config.registry.backend {
@@ -208,15 +219,16 @@ async fn health_check_loop(state: Arc<ServerState>) {
 
         let slots = state.slot_manager.get_assigned_slots().await;
         for slot_id in slots {
-            let seq = match state.slot_manager.get_current_seq(slot_id).await {
-                Ok(s) => s.to_string(),
-                Err(_) => continue,
+            // Use latest blob_id instead of seq for health reporting
+            let blob_id = match get_latest_blob_id_for_slot(&state, slot_id).await {
+                Ok(Some(id)) => id,
+                _ => continue,
             };
 
             let health = SlotHealth {
                 slot_id,
                 node_id: state.node.node_id().to_string(),
-                seq,
+                seq: blob_id,  // Using blob_id as the sequence identifier
                 status: ReplicaStatus::Healthy,
                 last_updated: chrono::Utc::now(),
             };
@@ -226,6 +238,12 @@ async fn health_check_loop(state: Arc<ServerState>) {
             }
         }
     }
+}
+
+async fn get_latest_blob_id_for_slot(state: &Arc<ServerState>, slot_id: u16) -> Result<Option<String>> {
+    let slot = state.slot_manager.get_slot(slot_id).await?;
+    let store = MetadataStore::new(slot)?;
+    store.get_latest_blob_id().map(|opt| opt.map(|ulid| ulid.to_string()))
 }
 
 async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
@@ -252,14 +270,14 @@ async fn get_object(
     // Check if we have the slot locally
     if state.slot_manager.has_slot(slot_id).await {
         // Read from local storage
-        match get_object_local(&state, &path, slot_id).await {
+        match get_blob_local(&state, &path, query.version, slot_id).await {
             Ok(meta) => {
                 // Handle range request
                 let start = query.start.unwrap_or(0) as usize;
                 let end = query.end.map(|e| e as usize).unwrap_or(meta.size as usize);
 
-                // Stream the object data
-                match stream_object(&state, &meta, start, end).await {
+                // Stream the blob data
+                match stream_blob(&state, &meta, start, end).await {
                     Ok(data) => (StatusCode::OK, data).into_response(),
                     Err(e) => {
                         let resp = ApiResponse::<()> {
@@ -282,7 +300,7 @@ async fn get_object(
         }
     } else {
         // Proxy to a replica that has the slot
-        match proxy_to_replica(&state, slot_id, &path).await {
+        match proxy_to_replica(&state, slot_id, &path, query.version).await {
             Ok(response) => response,
             Err(e) => {
                 let resp = ApiResponse::<()> {
@@ -296,41 +314,47 @@ async fn get_object(
     }
 }
 
-async fn get_object_local(
+async fn get_blob_local(
     state: &Arc<ServerState>,
     path: &str,
+    version: Option<i64>,
     slot_id: u16,
-) -> Result<ObjectMeta> {
+) -> Result<BlobMeta> {
     let slot = state.slot_manager.get_slot(slot_id).await?;
     let store = MetadataStore::new(slot)?;
 
-    store
-        .get_object(path)?
-        .ok_or_else(|| AmberError::ObjectNotFound(path.to_string()))
+    match version {
+        Some(v) => store
+            .get_blob(path, v)?
+            .ok_or_else(|| AmberError::ObjectNotFound(format!("{}@v{}", path, v))),
+        None => store
+            .get_latest_blob(path)?
+            .ok_or_else(|| AmberError::ObjectNotFound(path.to_string())),
+    }
 }
 
-async fn stream_object(
+async fn stream_blob(
     state: &Arc<ServerState>,
-    meta: &ObjectMeta,
+    meta: &BlobMeta,
     start: usize,
     end: usize,
 ) -> Result<Vec<u8>> {
     let mut result = Vec::new();
     let mut current_pos = 0usize;
 
-    for chunk in &meta.chunks {
+    for (_index, chunk) in meta.chunks.iter().enumerate() {
         let chunk_start = current_pos;
-        let chunk_end = current_pos + chunk.size as usize;
+        let chunk_end = current_pos + chunk.len as usize;
 
         // Check if this chunk overlaps with the requested range
         if chunk_end > start && chunk_start < end {
-            let data = state.chunk_store.get(&chunk.hash).await?;
+            let data = state.chunk_store.get_chunk(&meta.blob_id, &chunk.id).await?;
 
             let chunk_offset_start = start.saturating_sub(chunk_start);
             let chunk_offset_end = if end < chunk_end {
                 end - chunk_start
             } else {
-                chunk.size as usize
+                chunk.len as usize
             };
 
             result.extend_from_slice(&data[chunk_offset_start..chunk_offset_end]);
@@ -346,8 +370,9 @@ async fn proxy_to_replica(
     state: &Arc<ServerState>,
     slot_id: u16,
     path: &str,
+    version: Option<i64>,
 ) -> Result<Response> {
-    // Get healthy replicas from etcd
+    // Get healthy replicas from registry
     let replicas = state.registry.get_healthy_replicas(slot_id).await?;
 
     if replicas.is_empty() {
@@ -369,7 +394,10 @@ async fn proxy_to_replica(
 
     // Forward request
     let client = reqwest::Client::new();
-    let url = format!("http://{}/objects/{}", target.address, path);
+    let mut url = format!("http://{}/objects/{}", target.address, path);
+    if let Some(v) = version {
+        url.push_str(&format!("?version={}", v));
+    }
 
     let response = client
         .get(&url)
@@ -390,6 +418,7 @@ async fn proxy_to_replica(
 async fn put_object(
     State(state): State<Arc<ServerState>>,
     Path(path): Path<String>,
+    Query(query): Query<PutObjectQuery>,
     body: Bytes,
 ) -> impl IntoResponse {
     let slot_id = slot_for_key(&path, TOTAL_SLOTS);
@@ -420,9 +449,21 @@ async fn put_object(
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(resp)).into_response();
     }
 
-    // Split body into chunks and store
-    let chunks = match store_chunks(&state, &body).await {
-        Ok(c) => c,
+    // Get the slot for version calculation and storage
+    let slot = match state.slot_manager.get_slot(slot_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            let resp = ApiResponse::<()> {
+                success: false,
+                data: None,
+                error: Some(format!("Slot not available: {}", e)),
+            };
+            return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(resp)).into_response();
+        }
+    };
+
+    let store = match MetadataStore::new(slot) {
+        Ok(s) => s,
         Err(e) => {
             let resp = ApiResponse::<()> {
                 success: false,
@@ -433,18 +474,42 @@ async fn put_object(
         }
     };
 
-    // Create object metadata
-    let now = chrono::Utc::now();
-    let seq = Ulid::new().to_string();
-    let meta = ObjectMeta {
+    // Determine version
+    let version = match query.version {
+        Some(v) => v,
+        None => {
+            let max = store.get_max_version(&path).unwrap_or(0);
+            max + 1
+        }
+    };
+
+    // Generate blob_id (ULID)
+    let blob_id = Ulid::new().to_string();
+
+    // Split body into chunks and store
+    let chunks = match store_chunks(&state, &blob_id, &body).await {
+        Ok(c) => c,
+        Err(e) => {
+            // Clean up any stored chunks on failure
+            let _ = state.chunk_store.delete_blob_chunks(&blob_id).await;
+            let resp = ApiResponse::<()> {
+                success: false,
+                data: None,
+                error: Some(e.to_string()),
+            };
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(resp)).into_response();
+        }
+    };
+
+    // Create blob metadata
+    let meta = BlobMeta {
         path: path.clone(),
+        version,
+        blob_id: blob_id.clone(),
         size: body.len() as u64,
         chunks,
-        seq: seq.clone(),
-        created_at: now,
-        modified_at: now,
-        archived: false,
-        archive_location: None,
+        created_at: chrono::Utc::now(),
+        tombstoned_at: None,
     };
 
     // Perform 2PC
@@ -454,7 +519,8 @@ async fn put_object(
         Ok(_) => {
             let resp = WriteResponse {
                 path,
-                seq,
+                version,
+                blob_id,
                 chunks_stored: body.len() / CHUNK_SIZE + 1,
             };
             let api_resp: ApiResponse<WriteResponse> = ApiResponse {
@@ -478,25 +544,22 @@ async fn put_object(
 
 async fn store_chunks(
     state: &Arc<ServerState>,
+    blob_id: &str,
     data: &Bytes,
-) -> Result<Vec<ChunkInfo>> {
+) -> Result<Vec<ChunkRef>> {
     let mut chunks = Vec::new();
-    let mut offset = 0u64;
 
-    for chunk_data in data.chunks(CHUNK_SIZE) {
-        let hash = compute_hash(chunk_data);
-        let size = chunk_data.len() as u64;
+    for (index, chunk_data) in data.chunks(CHUNK_SIZE).enumerate() {
+        let chunk_id = compute_hash(chunk_data);
+        let len = chunk_data.len() as u64;
 
-        // Store chunk
-        state.chunk_store.put(Bytes::copy_from_slice(chunk_data)).await?;
+        // Store chunk using new blob-specific API
+        state.chunk_store.put_chunk(blob_id, index, Bytes::copy_from_slice(chunk_data)).await?;
 
-        chunks.push(ChunkInfo {
-            hash,
-            size,
-            offset,
+        chunks.push(ChunkRef {
+            id: chunk_id,
+            len,
         });
-
-        offset += size;
     }
 
     Ok(chunks)
@@ -506,7 +569,7 @@ async fn perform_2pc(
     state: &Arc<ServerState>,
     participants: Vec<String>,
     slot_id: u16,
-    meta: ObjectMeta,
+    meta: BlobMeta,
 ) -> Result<()> {
     let tx_id = state
         .twopc_coordinator
@@ -548,10 +611,7 @@ async fn perform_2pc(
                 // Store metadata locally
                 let slot = state.slot_manager.get_slot(slot_id).await?;
                 let store = MetadataStore::new(slot)?;
-                store.put_object(&tx.object_meta)?;
-
-                // Update slot seq
-                state.slot_manager.next_seq(slot_id).await?;
+                store.put_blob(&tx.blob_meta)?;
             }
         }
     } else {
@@ -565,6 +625,7 @@ async fn perform_2pc(
 async fn delete_object(
     State(state): State<Arc<ServerState>>,
     Path(path): Path<String>,
+    Query(query): Query<GetObjectQuery>,  // Reuse query to get optional version
 ) -> impl IntoResponse {
     let slot_id = slot_for_key(&path, TOTAL_SLOTS);
 
@@ -591,11 +652,34 @@ async fn delete_object(
                 }
             };
 
-            match store.delete_object(&path) {
+            // If no version specified, delete the latest version
+            let version = match query.version {
+                Some(v) => v,
+                None => {
+                    match store.get_max_version(&path) {
+                        Ok(v) if v > 0 => v,
+                        _ => {
+                            let resp = ApiResponse::<()> {
+                                success: false,
+                                data: None,
+                                error: Some("Blob not found".to_string()),
+                            };
+                            return (StatusCode::NOT_FOUND, axum::Json(resp)).into_response();
+                        }
+                    }
+                }
+            };
+
+            match store.delete_blob(&path, version) {
                 Ok(true) => {
                     let resp = ApiResponse {
                         success: true,
-                        data: Some(serde_json::json!({ "deleted": true })),
+                        data: Some(serde_json::json!({
+                            "deleted": true,
+                            "path": path,
+                            "version": version,
+                            "tombstoned": true
+                        })),
                         error: None,
                     };
                     (StatusCode::OK, axum::Json(resp)).into_response()
@@ -604,7 +688,7 @@ async fn delete_object(
                     let resp = ApiResponse::<()> {
                         success: false,
                         data: None,
-                        error: Some("Object not found".to_string()),
+                        error: Some("Blob not found or already deleted".to_string()),
                     };
                     (StatusCode::NOT_FOUND, axum::Json(resp)).into_response()
                 }
@@ -640,7 +724,7 @@ async fn list_objects(
     for slot_id in slots {
         if let Ok(slot) = state.slot_manager.get_slot(slot_id).await {
             if let Ok(store) = MetadataStore::new(slot) {
-                if let Ok(objects) = store.list_objects(&query.prefix, query.limit) {
+                if let Ok(objects) = store.list_blobs(&query.prefix, query.limit, query.include_tombstoned) {
                     all_objects.extend(objects);
                 }
             }
@@ -652,11 +736,12 @@ async fn list_objects(
         .into_iter()
         .map(|meta| ObjectResponse {
             path: meta.path,
+            version: meta.version,
+            blob_id: meta.blob_id,
             size: meta.size,
             chunks: meta.chunks,
-            seq: meta.seq,
             created_at: meta.created_at.to_rfc3339(),
-            modified_at: meta.modified_at.to_rfc3339(),
+            tombstoned_at: meta.tombstoned_at.map(|t| t.to_rfc3339()),
         })
         .collect();
 

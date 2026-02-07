@@ -19,5 +19,8 @@ pub use registry::{Registry, DynRegistry, SlotEvent};
 pub use registry::etcd::EtcdRegistry;
 pub use registry::redis::RedisRegistry;
 pub use slot_manager::{SlotManager, Slot, SlotInfo, SlotHealth, ReplicaStatus, slot_for_key, TOTAL_SLOTS, CHUNK_SIZE};
-pub use storage::{ChunkStore, MetadataStore, ObjectMeta, ChunkInfo, compute_hash, verify_hash};
+pub use storage::{ChunkStore, MetadataStore, BlobMeta, ChunkRef, BlobChunkArchive, compute_hash, verify_hash};
+// Legacy exports for backward compatibility
+pub use storage::BlobMeta as ObjectMeta;
+pub use storage::ChunkRef as ChunkInfo;
 pub use two_phase_commit::{TwoPhaseCommit, TwoPhaseParticipant, Transaction, TransactionState, Vote};
