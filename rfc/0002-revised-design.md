@@ -20,7 +20,7 @@ RFC 0001 偏向“按 blob_id/chunk 管理”的实现路径，工程上可行�
 1. **尽可能简单**：优先保证可实现、可运维、可恢复。
 2. **架构接近 MinIO**：对象按路径组织，元信息与数据文件解耦。
 3. **保留 Slot 预分片能力**：通过 `hash(blobPath) -> slot` 固定路由。
-4. **SQLite3 作为本地元信息真相源**：使用 `filestores` 表管理逻辑文件。
+4. **SQLite3 作为本地元信息真相源**：使用 `file_entries` 表管理逻辑文件。
 
 ## 非目标（本 RFC 不解决）
 
@@ -97,10 +97,10 @@ slot_id = hash64(normalized_blob_path) % slot_count
 
 ## SQLite3 元信息模型（每 Slot）
 
-`meta.sqlite3` 至少包含一张 `filestores` 表。
+`meta.sqlite3` 至少包含一张 `file_entries` 表。
 
 ```sql
-CREATE TABLE IF NOT EXISTS filestores (
+CREATE TABLE IF NOT EXISTS file_entries (
     slot_id        INTEGER NOT NULL,
     blob_path      TEXT NOT NULL,
     file_name      TEXT NOT NULL, -- meta.json | part.<sha256> | tombstone.<sha256>
@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS filestores (
     storage_kind   TEXT NOT NULL CHECK (storage_kind IN ('inline', 'external')),
 
     inline_data    BLOB,          -- 仅 meta/tombstone 使用
-    external_path  TEXT,          -- 仅 part 使用（相对 slot 根目录）
+    external_path  TEXT,          -- part 的本地路径（相对 slot 根目录）
+    archive_url    TEXT,          -- part 的归档位置（可选），如 s3://bucket/key?range=bytes=0-1048575
 
     size_bytes     INTEGER NOT NULL,
     sha256         TEXT NOT NULL,
@@ -118,17 +119,21 @@ CREATE TABLE IF NOT EXISTS filestores (
     PRIMARY KEY (slot_id, blob_path, file_name),
 
     CHECK (
-      (storage_kind = 'inline'  AND inline_data IS NOT NULL AND external_path IS NULL)
+      (storage_kind = 'inline'  AND inline_data IS NOT NULL AND external_path IS NULL AND archive_url IS NULL)
       OR
-      (storage_kind = 'external' AND inline_data IS NULL AND external_path IS NOT NULL)
+      (storage_kind = 'external' AND inline_data IS NULL AND (external_path IS NOT NULL OR archive_url IS NOT NULL))
     )
 );
 
-CREATE INDEX IF NOT EXISTS idx_filestores_blob_kind_time
-ON filestores(slot_id, blob_path, file_kind, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_file_entries_blob_kind_time
+ON file_entries(slot_id, blob_path, file_kind, updated_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_filestores_prefix
-ON filestores(slot_id, blob_path);
+CREATE INDEX IF NOT EXISTS idx_file_entries_prefix
+ON file_entries(slot_id, blob_path);
+
+CREATE INDEX IF NOT EXISTS idx_file_entries_archive_url
+ON file_entries(slot_id, archive_url)
+WHERE archive_url IS NOT NULL;
 ```
 
 ### 记录规则
@@ -142,11 +147,17 @@ ON filestores(slot_id, blob_path);
   - 追加写（不覆盖），文件名由内容哈希决定
 - `part.<sha256>`
   - `file_kind='part'`, `storage_kind='external'`
-  - `external_path` 指向 `objects/<blobPath>/part.<sha256>`
+  - `external_path` 指向 `objects/<blobPath>/part.<sha256>`（本地仍在热数据时）
+  - `archive_url` 可选；当 part 进入冷存（如 S3）时记录远端地址和 range
+
+`archive_url` 格式建议：
+
+- `s3://<bucket>/<object_path>?range=bytes=<start>-<end>`
+- 示例：`s3://amberblob-archive/slot-731/pack-00042?range=bytes=1048576-2097151`
 
 ### 执行层约束
 
-- **可见性真相源**：`filestores` 中的 `meta.json` / `tombstone.*`。
+- **可见性真相源**：`file_entries` 中的 `meta.json` / `tombstone.*`。
 - **写入状态**：不引入持久化事务日志，写入状态仅存在于单次请求生命周期。
 - **反熵输入**：基于当前 head 快照（而非操作日志）做差异修复。
 
@@ -208,7 +219,7 @@ ON filestores(slot_id, blob_path);
 5. **构造新 head**：生成 `meta.json`（包含 `generation`、`write_id`、parts、size、etag）。
 6. **元信息提交（并行发到副本）**：每个副本在一个 SQLite 事务内：
    - 可选 CAS：仅当本地 head generation < `next_generation` 时覆盖；
-   - UPSERT `filestores` 的 `meta.json`；
+   - UPSERT `file_entries` 的 `meta.json`；
    - UPSERT 本次涉及的 `part.<sha256>` external 引用；
 7. **成功返回**：`commit_acks >= W` 即对客户端返回成功；未提交副本后续由 anti-entropy 修复。
 
@@ -218,7 +229,7 @@ ON filestores(slot_id, blob_path);
 - **部分副本已提交**：读写以 quorum 成功为准，落后副本依赖 anti-entropy 拉齐 head 与 parts。
 - **遗留 part 文件**：若最终未被任何 `meta.json` 引用，交由 GC 延迟回收（如 24h 宽限）。
 
-可见性规则：**以 `filestores` 中 head（`meta.json` / tombstone）提交成功为准**。
+可见性规则：**以 `file_entries` 中 head（`meta.json` / tombstone）提交成功为准**。
 
 ### GET / 读取路径
 
@@ -233,7 +244,7 @@ ON filestores(slot_id, blob_path);
 1. 路由并决议 `next_generation`。
 2. 生成 tombstone JSON，计算 `tombstone.<sha256>`。
 3. 并行提交 tombstone 到副本，`commit_acks >= W` 即成功：
-   - 在 `filestores` 插入 tombstone（inline）；
+   - 在 `file_entries` 插入 tombstone（inline）；
 4. part 不同步删除，交由 GC 延迟回收。
 
 ---
@@ -252,7 +263,7 @@ ON filestores(slot_id, blob_path);
 
 #### 阶段 A：头部快照与摘要
 
-每个副本基于本地 `filestores` 计算 slot 快照，不依赖任何 oplog：
+每个副本基于本地 `file_entries` 计算 slot 快照，不依赖任何 oplog：
 
 - 对每个 `blob_path` 提取当前 head：`(head_kind, generation, head_sha256)`；
 - 将路径按前缀分桶（例如前 2 字节）；
@@ -283,7 +294,7 @@ ON filestores(slot_id, blob_path);
 ### Anti-Entropy 的幂等与收敛保证
 
 - `part.<sha256>` 内容寻址，重复拉取可安全跳过。
-- `filestores` 通过 `(slot_id, blob_path, file_name)` 主键 UPSERT，天然幂等。
+- `file_entries` 通过 `(slot_id, blob_path, file_name)` 主键 UPSERT，天然幂等。
 - 差异检测仅依赖“当前状态快照”，不依赖请求期状态或持久化事务日志。
 - 在网络恢复后，所有副本最终收敛到同一 head 集合（最终一致）。
 
@@ -312,7 +323,7 @@ ON filestores(slot_id, blob_path);
 | 维度 | RFC 0001 | RFC 0002 |
 |---|---|---|
 | 数据组织 | `blob_id/chunks` 目录 | `blobPath` 逻辑目录 + `part.<sha256>` |
-| 元信息模型 | `blobs` 表 + chunk JSON | 统一 `filestores`（meta/tombstone/part 引用） |
+| 元信息模型 | `blobs` 表 + chunk JSON | 统一 `file_entries`（meta/tombstone/part 引用） |
 | 对象定位 | path/version -> blob_id | path -> meta.json -> part 列表 |
 | 删除语义 | `tombstoned_at` 字段 | `tombstone.<sha256>` 逻辑文件 |
 | 复杂度 | 偏高（版本/chunk 生命周期） | 更直接，接近 MinIO 心智模型 |
@@ -321,7 +332,7 @@ ON filestores(slot_id, blob_path);
 
 ## 实施建议（最小落地顺序）
 
-1. 先落地单机单副本：`slot hash + filestores + part external file`。
+1. 先落地单机单副本：`slot hash + file_entries + part external file`。
 2. 完成 PUT/GET/DELETE/LIST 的本地一致语义。
 3. 增加 slot 级 GC。
 4. 最后叠加跨节点复制与反熵。
@@ -334,6 +345,289 @@ RFC 0002 将 AmberBlob 的核心从“chunk/事务驱动”收敛为“对象路
 
 - 路由层保留预分片 slot；
 - 存储层采用 MinIO 风格对象布局；
-- 元信息统一进入 SQLite `filestores`，part 数据落文件系统 external blob。
+- 元信息统一进入 SQLite `file_entries`，part 数据落文件系统 external blob。
 
 该方案实现路径更短、运维心智更统一，并为后续复制与反熵保留扩展空间。
+
+---
+
+## HTTP API 设计（对外 / 对内）
+
+> 本节定义 RFC 0002 的 API 契约。目标是：客户端接口稳定、节点间接口最小化、支持无状态写入与后台 healing。
+
+### 通用约定
+
+- 协议：HTTP/1.1（可升级 HTTP/2）。
+- 编码：
+  - 对象内容使用原始二进制流。
+  - 控制面请求与响应使用 `application/json`。
+- 认证（建议）：
+  - 外部 API：AK/SK 或 Bearer Token（后续 RFC 细化）。
+  - 内部 API：mTLS + `X-AmberBlob-Node-Id`。
+- 幂等键：`X-AmberBlob-Write-Id`（PUT/DELETE 建议必传）。
+- 追踪：`X-Request-Id`（可选，服务端透传）。
+
+### 对外 API（Client-Facing）
+
+#### 1) 健康与路由
+
+- `GET /api/v1/healthz`
+  - 用途：节点存活与就绪检查。
+  - `200 OK` 示例：
+
+```json
+{
+  "status": "ok",
+  "node_id": "edge-node-001",
+  "group_id": "edge-cluster-001"
+}
+```
+
+- `GET /api/v1/nodes`
+  - 用途：返回当前 group 节点视图。
+  - `200 OK` 示例：
+
+```json
+{
+  "nodes": [
+    {"node_id": "edge-node-001", "address": "127.0.0.1:8080", "status": "healthy"}
+  ]
+}
+```
+
+- `GET /api/v1/slots/resolve?path=<blobPath>`
+  - 用途：按 path 解析 `slot_id` 与副本列表（便于调试和集成测试）。
+  - `200 OK` 示例：
+
+```json
+{
+  "path": "images/a.png",
+  "slot_id": 731,
+  "replicas": ["edge-node-001", "edge-node-002", "edge-node-003"],
+  "write_quorum": 2
+}
+```
+
+#### 2) 对象读写
+
+- `PUT /api/v1/blobs/{blobPath}`
+  - 请求头：
+    - `Content-Type: application/octet-stream`
+    - `X-AmberBlob-Write-Id: <uuid>`（幂等）
+    - 可选 `If-Match` / `If-None-Match`
+  - 语义：
+    - 无状态写入，写入流程遵循本 RFC 的 quorum 语义。
+    - 同一 `(blobPath, write_id)` 重试必须幂等。
+  - `201 Created`（首次提交）示例：
+
+```json
+{
+  "path": "images/a.png",
+  "slot_id": 731,
+  "generation": 12,
+  "etag": "b4d6...",
+  "size_bytes": 1049600,
+  "committed_replicas": 2
+}
+```
+
+  - `200 OK`（幂等重试命中）示例：
+
+```json
+{
+  "path": "images/a.png",
+  "generation": 12,
+  "etag": "b4d6...",
+  "idempotent_replay": true
+}
+```
+
+- `GET /api/v1/blobs/{blobPath}`
+  - 支持 `Range: bytes=start-end`。
+  - 成功返回对象二进制流。
+  - 返回头建议：
+    - `ETag: <etag>`
+    - `X-AmberBlob-Generation: <generation>`
+    - `Content-Length`
+  - 错误：`404 Not Found`（不存在）、`410 Gone`（被 tombstone 覆盖）。
+
+- `HEAD /api/v1/blobs/{blobPath}`
+  - 不返回 body，仅返回元信息头：`ETag`、`X-AmberBlob-Generation`、`Content-Length`。
+
+- `DELETE /api/v1/blobs/{blobPath}`
+  - 请求头：`X-AmberBlob-Write-Id`（建议）。
+  - 语义：写入 `tombstone.<sha256>` 到 quorum。
+  - 成功：`200 OK` 或 `204 No Content`。
+
+- `GET /api/v1/blobs?prefix=<p>&limit=<n>&cursor=<c>&include_deleted=false`
+  - 用途：按前缀列举。
+  - `200 OK` 示例：
+
+```json
+{
+  "items": [
+    {
+      "path": "images/a.png",
+      "generation": 12,
+      "etag": "b4d6...",
+      "size_bytes": 1049600,
+      "deleted": false,
+      "updated_at": "2026-02-08T10:00:00Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+### 对内 API（Node-to-Node）
+
+> 对内 API 只服务节点间 fanout、读取补洞、anti-entropy 与 healing。
+
+#### 1) 写入 fanout
+
+- `PUT /internal/v1/slots/{slot_id}/blobs/{blobPath}/parts/{sha256}`
+  - 请求头：
+    - `X-AmberBlob-Write-Id`
+    - `X-AmberBlob-Generation`
+    - `X-AmberBlob-Part-Offset`
+    - `X-AmberBlob-Part-Length`
+  - 请求体：part 原始 bytes。
+  - 语义：
+    - 若本地已有同 hash part，返回复用。
+    - 重试幂等。
+  - `200 OK` 示例：
+
+```json
+{
+  "accepted": true,
+  "reused": false,
+  "sha256": "a1..."
+}
+```
+
+- `PUT /internal/v1/slots/{slot_id}/blobs/{blobPath}/head`
+  - 请求体：`meta.json` 或 `tombstone.*` 的 JSON 内容。
+  - 关键字段：`head_kind`（`meta`/`tombstone`）、`generation`、`head_sha256`。
+  - 语义：CAS 覆盖（仅新 head 覆盖旧 head）。
+  - `200 OK` 示例：
+
+```json
+{
+  "applied": true,
+  "head_kind": "meta",
+  "generation": 12
+}
+```
+
+- `GET /internal/v1/slots/{slot_id}/blobs/{blobPath}/head`
+  - 返回当前 head 摘要与内联内容（meta/tombstone）。
+
+#### 2) 对象拉取与补洞
+
+- `GET /internal/v1/slots/{slot_id}/parts/{sha256}`
+  - 用途：拉取缺失 part。
+  - 返回：part 原始二进制流。
+
+#### 3) Anti-Entropy / Healing
+
+- `GET /internal/v1/slots/{slot_id}/heal/buckets?prefix_len=2`
+  - 返回该 slot 的桶摘要。
+  - `200 OK` 示例：
+
+```json
+{
+  "slot_id": 731,
+  "prefix_len": 2,
+  "buckets": [
+    {"prefix": "0a", "digest": "f1...", "objects": 42}
+  ]
+}
+```
+
+- `POST /internal/v1/slots/{slot_id}/heal/heads`
+  - 请求体：`{"prefixes": ["0a", "0b"]}`
+  - 返回：每个前缀下 `blob_path -> (head_kind, generation, head_sha256)` 列表。
+
+- `POST /internal/v1/slots/{slot_id}/heal/repair`
+  - 请求体示例：
+
+```json
+{
+  "source_node_id": "edge-node-001",
+  "blob_paths": ["images/a.png"],
+  "dry_run": false
+}
+```
+
+  - 返回示例：
+
+```json
+{
+  "slot_id": 731,
+  "repaired_objects": 1,
+  "skipped_objects": 0,
+  "errors": []
+}
+```
+
+### 错误码约定
+
+- `400 Bad Request`：参数非法、路径非法。
+- `401/403`：认证或鉴权失败。
+- `404 Not Found`：对象不存在。
+- `409 Conflict`：`If-Match` / generation CAS 冲突。
+- `410 Gone`：对象被 tombstone 删除。
+- `412 Precondition Failed`：前置条件失败。
+- `429 Too Many Requests`：节点过载限流。
+- `503 Service Unavailable`：quorum 不满足或节点不可用。
+
+### 与核心流程的映射
+
+- 写入路径：`PUT /api/v1/blobs/*` -> 多次 `PUT /internal/.../parts/*` -> `PUT /internal/.../head`。
+- 反熵路径：`GET /internal/.../heal/buckets` -> `POST /internal/.../heal/heads` -> `POST /internal/.../heal/repair`。
+
+---
+
+## Integration Test 设计（integration/）
+
+> 测试目标：验证 RFC 0002 HTTP API 契约，覆盖外部 API、内部 API、以及节点故障后的 healing。
+
+### 目录结构
+
+```text
+integration/
+├── _harness.py
+├── 001_cluster_bootstrap.py
+├── 002_external_blob_crud.py
+├── 003_internal_healing.py
+└── run_all.py
+```
+
+### 自举策略
+
+- 每个 case 都通过 `integration/_harness.py`：
+  - 生成唯一 `group_id`。
+  - 为每个节点生成配置文件和数据目录。
+  - 启动多节点 `amberblob server` 进程。
+- Redis 不由脚本拉起，默认直连：`redis://127.0.0.1:6379`。
+
+### Case 说明
+
+- `001_cluster_bootstrap.py`
+  - 验证 `GET /api/v1/healthz`、`GET /api/v1/nodes`、`GET /api/v1/slots/resolve`。
+
+- `002_external_blob_crud.py`
+  - 验证 `PUT/GET/HEAD/LIST/DELETE`。
+  - 验证 `X-AmberBlob-Write-Id` 幂等重试语义。
+
+- `003_internal_healing.py`
+  - 先下线一个节点制造数据滞后。
+  - 写入对象后重启滞后节点。
+  - 通过 `heal/buckets + heal/repair` 修复并校验读取成功。
+
+### 运行方式
+
+- 跑全部：`python3 integration/run_all.py --build-if-missing`
+- 跑单个：`python3 integration/002_external_blob_crud.py --build-if-missing`
+
+> 这些测试是 API 契约测试：当实现完成后，应作为回归测试长期保留。
