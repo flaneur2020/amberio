@@ -1,8 +1,8 @@
 use super::{
     HealHeadItem, HealHeadsRequest, HealHeadsResponse, HealRepairRequest, HealRepairResponse,
     HealSlotlet, HealSlotletsQuery, HealSlotletsResponse, InternalHeadApplyRequest,
-    InternalHeadApplyResponse, InternalHeadResponse, InternalPartPutResponse, InternalPathQuery,
-    ServerState, normalize_blob_path, response_error,
+    InternalHeadApplyResponse, InternalHeadResponse, InternalPartPutResponse, InternalPartQuery,
+    InternalPathQuery, ServerState, normalize_blob_path, response_error,
 };
 use amberblob_core::{
     AmberError, HeadKind, HealHeadsOperationRequest, HealRepairOperationRequest,
@@ -22,7 +22,7 @@ use std::sync::Arc;
 pub(crate) async fn internal_put_part(
     State(state): State<Arc<ServerState>>,
     Path((slot_id, sha256)): Path<(u16, String)>,
-    Query(query): Query<InternalPathQuery>,
+    Query(query): Query<InternalPartQuery>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -34,26 +34,34 @@ pub(crate) async fn internal_put_part(
         None => return response_error(StatusCode::BAD_REQUEST, "path query is required"),
     };
 
-    let offset = headers
-        .get("x-amberblob-part-offset")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
+    let generation = query
+        .generation
+        .or_else(|| {
+            headers
+                .get("x-amberblob-generation")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<i64>().ok())
+        })
         .unwrap_or(0);
 
-    let length = headers
-        .get("x-amberblob-part-length")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
+    let Some(part_no) = query.part_no.or_else(|| {
+        headers
+            .get("x-amberblob-part-no")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u32>().ok())
+    }) else {
+        return response_error(StatusCode::BAD_REQUEST, "part_no is required");
+    };
 
     let result = state
         .internal_put_part_operation
         .run(InternalPutPartOperationRequest {
             slot_id,
             path,
+            generation,
+            part_no,
             sha256,
             body,
-            offset,
-            length,
         })
         .await;
 
@@ -77,7 +85,7 @@ pub(crate) async fn internal_put_part(
 pub(crate) async fn internal_get_part(
     State(state): State<Arc<ServerState>>,
     Path((slot_id, sha256)): Path<(u16, String)>,
-    Query(query): Query<InternalPathQuery>,
+    Query(query): Query<InternalPartQuery>,
 ) -> impl IntoResponse {
     let path = match query.path {
         Some(path) => match normalize_blob_path(&path) {
@@ -91,19 +99,24 @@ pub(crate) async fn internal_get_part(
         .internal_get_part_operation
         .run(InternalGetPartOperationRequest {
             slot_id,
-            sha256,
+            sha256: Some(sha256),
             path,
+            generation: query.generation,
+            part_no: query.part_no,
         })
         .await;
 
     match result {
-        Ok(InternalGetPartOperationOutcome::Found(part_bytes)) => {
-            let mut response = Response::new(part_bytes.into());
+        Ok(InternalGetPartOperationOutcome::Found(part)) => {
+            let mut response = Response::new(part.bytes.into());
             *response.status_mut() = StatusCode::OK;
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/octet-stream"),
             );
+            if let Ok(value) = HeaderValue::from_str(&part.sha256) {
+                response.headers_mut().insert("x-amberblob-sha256", value);
+            }
             response
         }
         Ok(InternalGetPartOperationOutcome::NotFound) => {

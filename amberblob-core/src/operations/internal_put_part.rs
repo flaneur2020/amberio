@@ -1,4 +1,4 @@
-use crate::{AmberError, MetadataStore, PartRef, PartStore, Result, SlotManager, compute_hash};
+use crate::{AmberError, MetadataStore, PartStore, Result, SlotManager, compute_hash};
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -12,10 +12,10 @@ pub struct InternalPutPartOperation {
 pub struct InternalPutPartOperationRequest {
     pub slot_id: u16,
     pub path: String,
+    pub generation: i64,
+    pub part_no: u32,
     pub sha256: String,
     pub body: Bytes,
-    pub offset: u64,
-    pub length: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,10 +39,10 @@ impl InternalPutPartOperation {
         let InternalPutPartOperationRequest {
             slot_id,
             path,
+            generation,
+            part_no,
             sha256,
             body,
-            offset,
-            length,
         } = request;
 
         if compute_hash(&body) != sha256 {
@@ -55,25 +55,22 @@ impl InternalPutPartOperation {
 
         let put_result = self
             .part_store
-            .put_part(slot_id, &path, &sha256, body)
+            .put_part(slot_id, &path, generation, part_no, &sha256, body)
             .await?;
 
-        let length = length.unwrap_or_else(|| {
-            std::fs::metadata(&put_result.part_path)
-                .map(|meta| meta.len())
-                .unwrap_or(0)
-        });
+        let length = std::fs::metadata(&put_result.part_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
 
-        let part = PartRef {
-            name: format!("part.{}", sha256),
-            sha256: sha256.clone(),
-            offset,
+        store.upsert_part_entry(
+            &path,
+            generation,
+            part_no,
+            &sha256,
             length,
-            external_path: Some(put_result.part_path.to_string_lossy().to_string()),
-            archive_url: None,
-        };
-
-        store.upsert_part_entry(&path, &part)?;
+            Some(put_result.part_path.to_string_lossy().as_ref()),
+            None,
+        )?;
 
         Ok(InternalPutPartOperationResult {
             reused: put_result.reused,

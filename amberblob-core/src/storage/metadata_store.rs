@@ -1,5 +1,5 @@
 use crate::error::{AmberError, Result};
-use crate::slot_manager::Slot;
+use crate::slot_manager::{PART_SIZE, Slot};
 use crate::storage::compute_hash;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -7,16 +7,18 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PartRef {
-    pub name: String,
-    pub sha256: String,
-    pub offset: u64,
-    pub length: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub external_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub archive_url: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PartIndexState {
+    None,
+    Partial,
+    Complete,
+}
+
+impl Default for PartIndexState {
+    fn default() -> Self {
+        Self::Complete
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,10 +26,18 @@ pub struct BlobMeta {
     pub path: String,
     pub slot_id: u16,
     pub generation: i64,
+    #[serde(default)]
     pub version: i64,
     pub size_bytes: u64,
     pub etag: String,
-    pub parts: Vec<PartRef>,
+    #[serde(default = "default_part_size")]
+    pub part_size: u64,
+    #[serde(default)]
+    pub part_count: u32,
+    #[serde(default)]
+    pub part_index_state: PartIndexState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_url: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -56,6 +66,18 @@ pub struct BlobHead {
     pub updated_at: DateTime<Utc>,
     pub meta: Option<BlobMeta>,
     pub tombstone: Option<TombstoneMeta>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PartEntry {
+    pub blob_path: String,
+    pub generation: i64,
+    pub part_no: u32,
+    pub file_name: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub external_path: Option<String>,
+    pub archive_url: Option<String>,
 }
 
 pub struct MetadataStore {
@@ -107,6 +129,7 @@ impl MetadataStore {
                 size_bytes INTEGER NOT NULL DEFAULT 0,
                 sha256 TEXT NOT NULL,
                 generation INTEGER NOT NULL DEFAULT 0,
+                part_no INTEGER,
                 etag TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -114,6 +137,14 @@ impl MetadataStore {
             )",
             [],
         )?;
+
+        if !Self::has_column(&conn, "file_entries", "archive_url")? {
+            conn.execute("ALTER TABLE file_entries ADD COLUMN archive_url TEXT", [])?;
+        }
+
+        if !Self::has_column(&conn, "file_entries", "part_no")? {
+            conn.execute("ALTER TABLE file_entries ADD COLUMN part_no INTEGER", [])?;
+        }
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_file_entries_head
@@ -133,7 +164,27 @@ impl MetadataStore {
             [],
         )?;
 
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_entries_part_lookup
+             ON file_entries(slot_id, blob_path, generation, part_no)",
+            [],
+        )?;
+
         Ok(())
+    }
+
+    fn has_column(conn: &Connection, table: &str, target_column: &str) -> Result<bool> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+        let mut rows = stmt.query([])?;
+
+        while let Some(row) = rows.next()? {
+            let column: String = row.get(1)?;
+            if column == target_column {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     pub fn next_generation(&self, blob_path: &str) -> Result<i64> {
@@ -154,9 +205,34 @@ impl MetadataStore {
         Ok(max_generation.unwrap_or(0) + 1)
     }
 
-    pub fn upsert_part_entry(&self, blob_path: &str, part: &PartRef) -> Result<()> {
+    pub fn upsert_part_entry(
+        &self,
+        blob_path: &str,
+        generation: i64,
+        part_no: u32,
+        sha256: &str,
+        size_bytes: u64,
+        external_path: Option<&str>,
+        archive_url: Option<&str>,
+    ) -> Result<()> {
         let conn = self.get_conn()?;
         let now = Utc::now().to_rfc3339();
+        let file_name = format!("g.{}/part.{:08}.{}", generation, part_no, sha256);
+
+        conn.execute(
+            "DELETE FROM file_entries
+             WHERE slot_id = ?1
+               AND blob_path = ?2
+               AND file_kind = 'part'
+               AND generation = ?3
+               AND part_no = ?4",
+            params![
+                self.slot.slot_id as i64,
+                blob_path,
+                generation,
+                part_no as i64,
+            ],
+        )?;
 
         conn.execute(
             "INSERT INTO file_entries (
@@ -171,29 +247,110 @@ impl MetadataStore {
                 size_bytes,
                 sha256,
                 generation,
+                part_no,
                 etag,
                 created_at,
                 updated_at
-            ) VALUES (?1, ?2, ?3, 'part', 'external', NULL, ?4, ?5, ?6, ?7, 0, NULL, ?8, ?8)
+            ) VALUES (?1, ?2, ?3, 'part', 'external', NULL, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?10)
             ON CONFLICT(slot_id, blob_path, file_name) DO UPDATE SET
                 external_path = excluded.external_path,
                 archive_url = excluded.archive_url,
                 size_bytes = excluded.size_bytes,
                 sha256 = excluded.sha256,
+                generation = excluded.generation,
+                part_no = excluded.part_no,
                 updated_at = excluded.updated_at",
             params![
                 self.slot.slot_id as i64,
                 blob_path,
-                part.name,
-                part.external_path,
-                part.archive_url,
-                part.length as i64,
-                part.sha256,
+                file_name,
+                external_path,
+                archive_url,
+                size_bytes as i64,
+                sha256,
+                generation,
+                part_no as i64,
                 now,
             ],
         )?;
 
         Ok(())
+    }
+
+    pub fn get_part_entry(
+        &self,
+        blob_path: &str,
+        generation: i64,
+        part_no: u32,
+    ) -> Result<Option<PartEntry>> {
+        let conn = self.get_conn()?;
+
+        let entry = conn
+            .query_row(
+                "SELECT blob_path, generation, part_no, file_name, sha256, size_bytes, external_path, archive_url
+                 FROM file_entries
+                 WHERE slot_id = ?1
+                   AND blob_path = ?2
+                   AND file_kind = 'part'
+                   AND generation = ?3
+                   AND part_no = ?4
+                 ORDER BY pk DESC
+                 LIMIT 1",
+                params![
+                    self.slot.slot_id as i64,
+                    blob_path,
+                    generation,
+                    part_no as i64,
+                ],
+                |row| {
+                    let part_no_value: Option<i64> = row.get(2)?;
+                    Ok(PartEntry {
+                        blob_path: row.get(0)?,
+                        generation: row.get(1)?,
+                        part_no: part_no_value.unwrap_or(0) as u32,
+                        file_name: row.get(3)?,
+                        sha256: row.get(4)?,
+                        size_bytes: row.get::<_, i64>(5)? as u64,
+                        external_path: row.get(6)?,
+                        archive_url: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(entry)
+    }
+
+    pub fn list_part_entries(&self, blob_path: &str, generation: i64) -> Result<Vec<PartEntry>> {
+        let conn = self.get_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT blob_path, generation, part_no, file_name, sha256, size_bytes, external_path, archive_url
+             FROM file_entries
+             WHERE slot_id = ?1
+               AND blob_path = ?2
+               AND file_kind = 'part'
+               AND generation = ?3
+             ORDER BY part_no ASC, pk ASC",
+        )?;
+
+        let mut rows = stmt.query(params![self.slot.slot_id as i64, blob_path, generation])?;
+        let mut entries = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            let part_no_value: Option<i64> = row.get(2)?;
+            entries.push(PartEntry {
+                blob_path: row.get(0)?,
+                generation: row.get(1)?,
+                part_no: part_no_value.unwrap_or(0) as u32,
+                file_name: row.get(3)?,
+                sha256: row.get(4)?,
+                size_bytes: row.get::<_, i64>(5)? as u64,
+                external_path: row.get(6)?,
+                archive_url: row.get(7)?,
+            });
+        }
+
+        Ok(entries)
     }
 
     pub fn upsert_meta(&self, meta: &BlobMeta) -> Result<bool> {
@@ -224,10 +381,11 @@ impl MetadataStore {
                 size_bytes,
                 sha256,
                 generation,
+                part_no,
                 etag,
                 created_at,
                 updated_at
-            ) VALUES (?1, ?2, 'meta.json', 'meta', 'inline', ?3, NULL, NULL, ?4, ?5, ?6, ?7, ?8, ?8)
+            ) VALUES (?1, ?2, 'meta.json', 'meta', 'inline', ?3, NULL, NULL, ?4, ?5, ?6, NULL, ?7, ?8, ?8)
             ON CONFLICT(slot_id, blob_path, file_name) DO UPDATE SET
                 inline_data = excluded.inline_data,
                 size_bytes = excluded.size_bytes,
@@ -281,10 +439,11 @@ impl MetadataStore {
                 size_bytes,
                 sha256,
                 generation,
+                part_no,
                 etag,
                 created_at,
                 updated_at
-            ) VALUES (?1, ?2, ?3, 'tombstone', 'inline', ?4, NULL, NULL, ?5, ?6, ?7, NULL, ?8, ?8)
+            ) VALUES (?1, ?2, ?3, 'tombstone', 'inline', ?4, NULL, NULL, ?5, ?6, ?7, NULL, NULL, ?8, ?8)
             ON CONFLICT(slot_id, blob_path, file_name) DO UPDATE SET
                 inline_data = excluded.inline_data,
                 size_bytes = excluded.size_bytes,
@@ -468,8 +627,16 @@ impl MetadataStore {
                 let mut meta: BlobMeta = serde_json::from_slice(&row.inline_data)?;
                 meta.path = row.blob_path.clone();
                 meta.slot_id = self.slot.slot_id;
+                meta.generation = row.generation;
                 if meta.version == 0 {
                     meta.version = meta.generation;
+                }
+                if meta.part_size == 0 {
+                    meta.part_size = default_part_size();
+                }
+                if meta.part_count == 0 && meta.size_bytes > 0 {
+                    let part_size = meta.part_size.max(1);
+                    meta.part_count = meta.size_bytes.div_ceil(part_size) as u32;
                 }
 
                 Ok(Some(BlobHead {
@@ -509,4 +676,8 @@ fn parse_rfc3339(value: &str) -> Result<DateTime<Utc>> {
     let parsed = DateTime::parse_from_rfc3339(value)
         .map_err(|error| AmberError::Internal(format!("invalid RFC3339 timestamp: {}", error)))?;
     Ok(parsed.with_timezone(&Utc))
+}
+
+fn default_part_size() -> u64 {
+    PART_SIZE as u64
 }

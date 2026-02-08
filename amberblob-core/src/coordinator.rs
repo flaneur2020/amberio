@@ -1,7 +1,9 @@
-use crate::{AmberError, BlobMeta, NodeInfo, PartRef, Result, TombstoneMeta};
+use crate::{AmberError, BlobMeta, NodeInfo, Result, TombstoneMeta};
 use bytes::Bytes;
 use reqwest::{Client, Url, header};
 use serde::Serialize;
+
+const PART_INDEX_SENTINEL_SHA256: &str = "_";
 
 #[derive(Clone)]
 pub struct Coordinator {
@@ -11,7 +13,9 @@ pub struct Coordinator {
 
 #[derive(Clone)]
 pub struct ReplicatedPart {
-    pub part: PartRef,
+    pub part_no: u32,
+    pub sha256: String,
+    pub length: u64,
     pub data: Bytes,
 }
 
@@ -55,12 +59,44 @@ impl Coordinator {
         Ok(url)
     }
 
-    pub fn internal_part_url(
+    pub fn internal_part_url_by_sha(
         &self,
         address: &str,
         slot_id: u16,
         sha256: &str,
         path: &str,
+        generation: i64,
+        part_no: u32,
+    ) -> Result<Url> {
+        self.build_internal_part_url(address, slot_id, sha256, path, generation, part_no)
+    }
+
+    pub fn internal_part_url_by_index(
+        &self,
+        address: &str,
+        slot_id: u16,
+        path: &str,
+        generation: i64,
+        part_no: u32,
+    ) -> Result<Url> {
+        self.build_internal_part_url(
+            address,
+            slot_id,
+            PART_INDEX_SENTINEL_SHA256,
+            path,
+            generation,
+            part_no,
+        )
+    }
+
+    fn build_internal_part_url(
+        &self,
+        address: &str,
+        slot_id: u16,
+        sha256: &str,
+        path: &str,
+        generation: i64,
+        part_no: u32,
     ) -> Result<Url> {
         let mut url = Url::parse(&format!(
             "http://{}/internal/v1/slots/{}/parts/{}",
@@ -71,6 +107,8 @@ impl Coordinator {
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("path", path);
+            pairs.append_pair("generation", &generation.to_string());
+            pairs.append_pair("part_no", &part_no.to_string());
         }
 
         Ok(url)
@@ -88,16 +126,22 @@ impl Coordinator {
         head_sha256: &str,
     ) -> Result<()> {
         for part in parts {
-            let part_url =
-                self.internal_part_url(&replica.address, slot_id, &part.part.sha256, path)?;
+            let part_url = self.internal_part_url_by_sha(
+                &replica.address,
+                slot_id,
+                &part.sha256,
+                path,
+                generation,
+                part.part_no,
+            )?;
 
             let response = self
                 .client
                 .put(part_url)
                 .header("x-amberblob-write-id", write_id)
                 .header("x-amberblob-generation", generation.to_string())
-                .header("x-amberblob-part-offset", part.part.offset.to_string())
-                .header("x-amberblob-part-length", part.part.length.to_string())
+                .header("x-amberblob-part-no", part.part_no.to_string())
+                .header("x-amberblob-part-length", part.length.to_string())
                 .header(header::CONTENT_TYPE, "application/octet-stream")
                 .body(part.data.clone())
                 .send()
@@ -106,10 +150,10 @@ impl Coordinator {
 
             if !response.status().is_success() {
                 return Err(AmberError::Http(format!(
-                    "replica part write failed: node={} status={} sha={} path={}",
+                    "replica part write failed: node={} status={} part_no={} path={}",
                     replica.node_id,
                     response.status(),
-                    part.part.sha256,
+                    part.part_no,
                     path
                 )));
             }

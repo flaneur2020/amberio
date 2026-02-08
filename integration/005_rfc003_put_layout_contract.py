@@ -3,6 +3,7 @@
 
 Contract expectations:
 - part filename format: part.{index:08}.{sha256}
+- part files are written under generation directory g.{generation}
 - meta.json no longer carries parts[] list
 - meta.json carries part_count/part_size/part_index_state
 """
@@ -48,19 +49,27 @@ def main() -> None:
         if not isinstance(slot_id, int):
             raise AssertionError(f"PUT payload missing slot_id: {put_payload}")
 
-        blob_dir = (
+        generation = put_payload.get("generation")
+        if not isinstance(generation, int):
+            raise AssertionError(f"PUT payload missing generation: {put_payload}")
+
+        blob_root = (
             cluster.nodes[0].data_dir
             / "slots"
             / str(slot_id)
             / "blobs"
             / blob_path
         )
-        if not blob_dir.exists():
-            raise AssertionError(f"blob directory not found: {blob_dir}")
+        if not blob_root.exists():
+            raise AssertionError(f"blob root directory not found: {blob_root}")
 
-        part_files = [path.name for path in blob_dir.iterdir() if path.name.startswith("part.")]
+        generation_dir = blob_root / f"g.{generation}"
+        if not generation_dir.exists():
+            raise AssertionError(f"generation directory not found: {generation_dir}")
+
+        part_files = [path.name for path in generation_dir.iterdir() if path.name.startswith("part.")]
         if not part_files:
-            raise AssertionError(f"No part files found under {blob_dir}")
+            raise AssertionError(f"No part files found under {generation_dir}")
 
         non_indexed = [name for name in part_files if not INDEXED_PART_PATTERN.match(name)]
         if non_indexed:

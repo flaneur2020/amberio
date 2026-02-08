@@ -1,5 +1,5 @@
 use crate::{
-    AmberError, BlobMeta, Coordinator, MetadataStore, PART_SIZE, PartRef, PartStore,
+    AmberError, BlobMeta, Coordinator, MetadataStore, PART_SIZE, PartIndexState, PartStore,
     ReplicatedPart, Result, SlotManager, compute_hash,
 };
 use bytes::Bytes;
@@ -67,6 +67,7 @@ impl PutBlobOperation {
         let mut replicated_parts: Vec<ReplicatedPart> = Vec::new();
 
         let mut offset = 0usize;
+        let mut part_no = 0u32;
         while offset < body.len() {
             let end = (offset + PART_SIZE).min(body.len());
             let part_body = body.slice(offset..end);
@@ -74,25 +75,44 @@ impl PutBlobOperation {
 
             let put_result = self
                 .part_store
-                .put_part(slot_id, &path, &part_sha, part_body.clone())
+                .put_part(
+                    slot_id,
+                    &path,
+                    generation,
+                    part_no,
+                    &part_sha,
+                    part_body.clone(),
+                )
                 .await?;
 
-            let part = PartRef {
-                name: format!("part.{}", part_sha),
-                sha256: part_sha,
-                offset: offset as u64,
-                length: (end - offset) as u64,
-                external_path: Some(put_result.part_path.to_string_lossy().to_string()),
-                archive_url: None,
-            };
+            let external_path = put_result.part_path.to_string_lossy().to_string();
+            let part_len = (end - offset) as u64;
+            store.upsert_part_entry(
+                &path,
+                generation,
+                part_no,
+                &part_sha,
+                part_len,
+                Some(external_path.as_str()),
+                None,
+            )?;
 
-            store.upsert_part_entry(&path, &part)?;
             replicated_parts.push(ReplicatedPart {
-                part,
+                part_no,
+                sha256: part_sha,
+                length: part_len,
                 data: part_body,
             });
+
             offset = end;
+            part_no += 1;
         }
+
+        let part_count = if body.is_empty() {
+            0
+        } else {
+            body.len().div_ceil(PART_SIZE) as u32
+        };
 
         let meta = BlobMeta {
             path: path.clone(),
@@ -101,10 +121,10 @@ impl PutBlobOperation {
             version: generation,
             size_bytes: body.len() as u64,
             etag: etag.clone(),
-            parts: replicated_parts
-                .iter()
-                .map(|payload| payload.part.clone())
-                .collect(),
+            part_size: PART_SIZE as u64,
+            part_count,
+            part_index_state: PartIndexState::Complete,
+            archive_url: None,
             updated_at: Utc::now(),
         };
 

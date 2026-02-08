@@ -120,10 +120,7 @@ pub async fn run_server(config: Config) -> Result<()> {
         slot_manager.clone(),
         part_store.clone(),
     ));
-    let internal_put_head_operation = Arc::new(InternalPutHeadOperation::new(
-        slot_manager.clone(),
-        part_store.clone(),
-    ));
+    let internal_put_head_operation = Arc::new(InternalPutHeadOperation::new(slot_manager.clone()));
     let internal_get_head_operation = Arc::new(InternalGetHeadOperation::new(slot_manager.clone()));
 
     let heal_slotlets_operation = Arc::new(HealSlotletsOperation::new(slot_manager.clone()));

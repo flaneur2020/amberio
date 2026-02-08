@@ -28,6 +28,7 @@ pub use internal_get_head::{
 };
 pub use internal_get_part::{
     InternalGetPartOperation, InternalGetPartOperationOutcome, InternalGetPartOperationRequest,
+    InternalPartPayload,
 };
 pub use internal_put_head::{
     InternalPutHeadOperation, InternalPutHeadOperationRequest, InternalPutHeadOperationResult,
@@ -43,4 +44,5 @@ pub use put_blob::{
 };
 pub use read_blob::{
     ReadBlobOperation, ReadBlobOperationOutcome, ReadBlobOperationRequest, ReadBlobOperationResult,
+    ReadByteRange,
 };

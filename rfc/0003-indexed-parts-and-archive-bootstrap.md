@@ -222,24 +222,19 @@ RFC 0003 是对 RFC 0002 的收敛与扩展，不是推翻：
 
 ---
 
-## 迁移建议
+## 落地顺序（早期版本，直接迭代）
 
-### 迁移顺序
+当前处于早期版本阶段，不引入双轨版本与复杂兼容策略，直接演进到 RFC 0003 目标形态。
 
-1. 引入 `BlobMeta v2`（`part_count/part_size/part_index_state`）。
-2. 新写入切换到 `part.{index:08}.{sha256}`。
-3. 增加 `file_entries.part_no` 索引。
-4. 读路径支持两种格式：
-   - 旧：`meta.parts[]`
-   - 新：`part_count + part index/回源`
-5. 后台任务逐步将旧对象物化为新索引（可选）。
-
-### 兼容策略
-
-- 双读优先：先按新模型读取，失败再回退旧模型。
-- 新写统一用 v2，避免继续扩大 `parts[]`。
-
----
+1. 直接更新 `BlobMeta` 为小头模型（`part_count` / `part_size` / `part_index_state`），移除 `parts[]`。
+2. 写入路径直接切换为 `part.{index:08}.{sha256}` 命名。
+3. `file_entries` 直接增加 `part_no` 并建立 `(slot_id, blob_path, generation, part_no)` 索引。
+4. 读取路径直接以新模型实现：
+   - 先按 `(path, generation, part_no)` 查本地 part 索引；
+   - 未命中则 archive range 回源；
+   - 可选 read-through 落本地并补齐 part 索引。
+5. anti-entropy 优先收敛 head，part 通过读路径懒物化或后台任务渐进补齐。
+6. 不要求维护旧格式回退，减少实现分叉，优先快速闭环。
 
 ## 结论
 

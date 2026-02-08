@@ -11,8 +11,8 @@ pub struct PutPartResult {
     pub reused: bool,
 }
 
-/// PartStore stores external blob data as `part.{sha256}` files:
-/// `slots/{slot_id}/blobs/{blob_path}/part.{sha256}`.
+/// PartStore stores external blob data as indexed part files:
+/// `slots/{slot_id}/blobs/{blob_path}/g.{generation}/part.{index:08}.{sha256}`.
 pub struct PartStore {
     base_path: PathBuf,
 }
@@ -31,12 +31,14 @@ impl PartStore {
         &self,
         slot_id: u16,
         blob_path: &str,
+        generation: i64,
+        part_no: u32,
         sha256: &str,
         data: Bytes,
     ) -> Result<PutPartResult> {
         verify_hash(&data, sha256)?;
 
-        let part_path = self.part_path(slot_id, blob_path, sha256)?;
+        let part_path = self.part_path(slot_id, blob_path, generation, part_no, sha256)?;
         if let Some(parent) = part_path.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -62,18 +64,35 @@ impl PartStore {
         })
     }
 
-    pub async fn get_part(&self, slot_id: u16, blob_path: &str, sha256: &str) -> Result<Bytes> {
-        let part_path = self.part_path(slot_id, blob_path, sha256)?;
+    pub async fn get_part(
+        &self,
+        slot_id: u16,
+        blob_path: &str,
+        generation: i64,
+        part_no: u32,
+        sha256: &str,
+    ) -> Result<Bytes> {
+        let part_path = self.part_path(slot_id, blob_path, generation, part_no, sha256)?;
         if !part_path.exists() {
-            return Err(AmberError::PartNotFound(sha256.to_string()));
+            return Err(AmberError::PartNotFound(format!(
+                "slot={} path={} generation={} part_no={} sha256={}",
+                slot_id, blob_path, generation, part_no, sha256
+            )));
         }
 
         let bytes = fs::read(part_path).await?;
         Ok(Bytes::from(bytes))
     }
 
-    pub fn part_exists(&self, slot_id: u16, blob_path: &str, sha256: &str) -> bool {
-        self.part_path(slot_id, blob_path, sha256)
+    pub fn part_exists(
+        &self,
+        slot_id: u16,
+        blob_path: &str,
+        generation: i64,
+        part_no: u32,
+        sha256: &str,
+    ) -> bool {
+        self.part_path(slot_id, blob_path, generation, part_no, sha256)
             .map(|path| path.exists())
             .unwrap_or(false)
     }
@@ -86,9 +105,18 @@ impl PartStore {
         Ok(())
     }
 
-    pub fn part_path(&self, slot_id: u16, blob_path: &str, sha256: &str) -> Result<PathBuf> {
-        let file_name = format!("part.{}", sha256);
-        Ok(self.blob_dir(slot_id, blob_path)?.join(file_name))
+    pub fn part_path(
+        &self,
+        slot_id: u16,
+        blob_path: &str,
+        generation: i64,
+        part_no: u32,
+        sha256: &str,
+    ) -> Result<PathBuf> {
+        let file_name = Self::part_file_name(part_no, sha256);
+        Ok(self
+            .generation_dir(slot_id, blob_path, generation)?
+            .join(file_name))
     }
 
     pub fn blob_dir(&self, slot_id: u16, blob_path: &str) -> Result<PathBuf> {
@@ -101,6 +129,21 @@ impl PartStore {
             path.push(component);
         }
         Ok(path)
+    }
+
+    pub fn generation_dir(
+        &self,
+        slot_id: u16,
+        blob_path: &str,
+        generation: i64,
+    ) -> Result<PathBuf> {
+        Ok(self
+            .blob_dir(slot_id, blob_path)?
+            .join(format!("g.{}", generation)))
+    }
+
+    pub fn part_file_name(part_no: u32, sha256: &str) -> String {
+        format!("part.{:08}.{}", part_no, sha256)
     }
 }
 
@@ -153,28 +196,33 @@ mod tests {
         let store = PartStore::new(dir.path().to_path_buf()).unwrap();
 
         let slot_id = 7;
+        let generation = 3;
+        let part_no = 0;
         let blob_path = "a/b/c.txt";
         let body = Bytes::from("hello-world");
         let sha = compute_hash(&body);
 
         let put = store
-            .put_part(slot_id, blob_path, &sha, body.clone())
+            .put_part(slot_id, blob_path, generation, part_no, &sha, body.clone())
             .await
             .unwrap();
         assert!(!put.reused);
         assert!(put.part_path.exists());
 
-        let read = store.get_part(slot_id, blob_path, &sha).await.unwrap();
+        let read = store
+            .get_part(slot_id, blob_path, generation, part_no, &sha)
+            .await
+            .unwrap();
         assert_eq!(read, body);
 
         let reused = store
-            .put_part(slot_id, blob_path, &sha, body.clone())
+            .put_part(slot_id, blob_path, generation, part_no, &sha, body.clone())
             .await
             .unwrap();
         assert!(reused.reused);
 
-        assert!(store.part_exists(slot_id, blob_path, &sha));
+        assert!(store.part_exists(slot_id, blob_path, generation, part_no, &sha));
         store.delete_blob_parts(slot_id, blob_path).await.unwrap();
-        assert!(!store.part_exists(slot_id, blob_path, &sha));
+        assert!(!store.part_exists(slot_id, blob_path, generation, part_no, &sha));
     }
 }

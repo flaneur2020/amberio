@@ -6,7 +6,7 @@ use super::{
 use amberblob_core::{
     AmberError, DeleteBlobOperationOutcome, DeleteBlobOperationRequest, ListBlobsOperationRequest,
     PutBlobOperationOutcome, PutBlobOperationRequest, ReadBlobOperationOutcome,
-    ReadBlobOperationRequest, slot_for_key,
+    ReadBlobOperationRequest, ReadByteRange, slot_for_key,
 };
 use axum::{
     Json,
@@ -182,10 +182,16 @@ pub(crate) async fn v1_put_blob(
 pub(crate) async fn v1_get_blob(
     State(state): State<Arc<ServerState>>,
     Path(raw_path): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let path = match normalize_blob_path(&raw_path) {
         Ok(path) => path,
         Err(error) => return response_error(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+
+    let requested_range = match parse_range_header(&headers) {
+        Ok(range) => range,
+        Err(message) => return response_error(StatusCode::RANGE_NOT_SATISFIABLE, message),
     };
 
     let slot_id = slot_for_key(&path, state.config.replication.total_slots);
@@ -202,6 +208,7 @@ pub(crate) async fn v1_get_blob(
             replicas,
             local_node_id: state.node.node_id().to_string(),
             include_body: true,
+            range: requested_range,
         })
         .await;
 
@@ -213,16 +220,32 @@ pub(crate) async fn v1_get_blob(
         Ok(ReadBlobOperationOutcome::Deleted) => {
             return response_error(StatusCode::GONE, "object deleted");
         }
+        Err(AmberError::InvalidRequest(message)) => {
+            return response_error(StatusCode::RANGE_NOT_SATISFIABLE, message);
+        }
         Err(error) => return response_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     };
 
     let body = result.body.unwrap_or_default();
-    let mut response = Response::new(body.into());
-    *response.status_mut() = StatusCode::OK;
+    let mut response = Response::new(body.clone().into());
+    *response.status_mut() = if requested_range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+
+    if let Ok(value) = HeaderValue::from_str(&body.len().to_string()) {
+        response.headers_mut().insert(header::CONTENT_LENGTH, value);
+    }
+
     if let Ok(value) = HeaderValue::from_str(&result.meta.etag) {
         response.headers_mut().insert(header::ETAG, value);
     }
@@ -230,6 +253,18 @@ pub(crate) async fn v1_get_blob(
         response
             .headers_mut()
             .insert("x-amberblob-generation", value);
+    }
+
+    if requested_range.is_some() {
+        if let Some(range) = result.body_range {
+            let content_range = format!(
+                "bytes {}-{}/{}",
+                range.start, range.end, result.meta.size_bytes
+            );
+            if let Ok(value) = HeaderValue::from_str(&content_range) {
+                response.headers_mut().insert(header::CONTENT_RANGE, value);
+            }
+        }
     }
 
     response
@@ -258,6 +293,7 @@ pub(crate) async fn v1_head_blob(
             replicas,
             local_node_id: state.node.node_id().to_string(),
             include_body: false,
+            range: None,
         })
         .await;
 
@@ -285,6 +321,9 @@ pub(crate) async fn v1_head_blob(
     if let Ok(value) = HeaderValue::from_str(&result.meta.size_bytes.to_string()) {
         response.headers_mut().insert(header::CONTENT_LENGTH, value);
     }
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 
     response
 }
@@ -380,4 +419,44 @@ pub(crate) async fn v1_list_blobs(
         }),
     )
         .into_response()
+}
+
+fn parse_range_header(headers: &HeaderMap) -> std::result::Result<Option<ReadByteRange>, String> {
+    let Some(value) = headers.get(header::RANGE) else {
+        return Ok(None);
+    };
+
+    let range_value = value
+        .to_str()
+        .map_err(|_| "invalid Range header".to_string())?
+        .trim();
+
+    if range_value.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(raw) = range_value.strip_prefix("bytes=") else {
+        return Err("only bytes= range is supported".to_string());
+    };
+
+    let mut parts = raw.splitn(2, '-');
+    let start_str = parts.next().unwrap_or_default().trim();
+    let end_str = parts.next().unwrap_or_default().trim();
+
+    if start_str.is_empty() || end_str.is_empty() {
+        return Err("only explicit bytes=start-end is supported".to_string());
+    }
+
+    let start = start_str
+        .parse::<u64>()
+        .map_err(|_| "invalid range start".to_string())?;
+    let end = end_str
+        .parse::<u64>()
+        .map_err(|_| "invalid range end".to_string())?;
+
+    if start > end {
+        return Err("range start must be <= range end".to_string());
+    }
+
+    Ok(Some(ReadByteRange { start, end }))
 }

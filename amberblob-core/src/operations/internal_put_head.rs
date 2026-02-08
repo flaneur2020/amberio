@@ -1,6 +1,5 @@
 use crate::{
-    AmberError, BlobMeta, MetadataStore, PartStore, Result, SlotManager, TombstoneMeta,
-    compute_hash,
+    AmberError, BlobMeta, MetadataStore, Result, SlotManager, TombstoneMeta, compute_hash,
 };
 use chrono::Utc;
 use std::sync::Arc;
@@ -8,7 +7,6 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct InternalPutHeadOperation {
     slot_manager: Arc<SlotManager>,
-    part_store: Arc<PartStore>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,11 +27,8 @@ pub struct InternalPutHeadOperationResult {
 }
 
 impl InternalPutHeadOperation {
-    pub fn new(slot_manager: Arc<SlotManager>, part_store: Arc<PartStore>) -> Self {
-        Self {
-            slot_manager,
-            part_store,
-        }
+    pub fn new(slot_manager: Arc<SlotManager>) -> Self {
+        Self { slot_manager }
     }
 
     pub async fn run(
@@ -68,17 +63,6 @@ impl InternalPutHeadOperation {
                     meta.version = meta.generation;
                 }
                 meta.updated_at = Utc::now();
-
-                for part in &mut meta.parts {
-                    if part.external_path.is_none() {
-                        if let Ok(part_path) =
-                            self.part_store.part_path(slot_id, &meta.path, &part.sha256)
-                        {
-                            part.external_path = Some(part_path.to_string_lossy().to_string());
-                        }
-                    }
-                    store.upsert_part_entry(&meta.path, part)?;
-                }
 
                 let inline_data = serde_json::to_vec(&meta)?;
                 let head_sha = if head_sha256.is_empty() {

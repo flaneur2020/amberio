@@ -91,6 +91,13 @@ pub(crate) struct InternalPathQuery {
     pub(crate) path: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct InternalPartQuery {
+    pub(crate) path: Option<String>,
+    pub(crate) generation: Option<i64>,
+    pub(crate) part_no: Option<u32>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct InternalPartPutResponse {
     pub(crate) accepted: bool,

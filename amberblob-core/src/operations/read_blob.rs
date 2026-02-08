@@ -1,9 +1,11 @@
 use crate::{
-    AmberError, BlobHead, BlobMeta, Coordinator, HeadKind, MetadataStore, NodeInfo, PartRef,
-    PartStore, Result, SlotManager,
+    AmberError, BlobHead, BlobMeta, Coordinator, HeadKind, MetadataStore, NodeInfo, PART_SIZE,
+    PartStore, Result, SlotManager, compute_hash,
 };
 use bytes::Bytes;
 use chrono::Utc;
+use reqwest::header::HeaderMap;
+use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -13,6 +15,12 @@ pub struct ReadBlobOperation {
     coordinator: Arc<Coordinator>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ReadByteRange {
+    pub start: u64,
+    pub end: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReadBlobOperationRequest {
     pub slot_id: u16,
@@ -20,12 +28,14 @@ pub struct ReadBlobOperationRequest {
     pub replicas: Vec<NodeInfo>,
     pub local_node_id: String,
     pub include_body: bool,
+    pub range: Option<ReadByteRange>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ReadBlobOperationResult {
     pub meta: BlobMeta,
     pub body: Option<Bytes>,
+    pub body_range: Option<ReadByteRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +65,7 @@ impl ReadBlobOperation {
             replicas,
             local_node_id,
             include_body,
+            range,
         } = request;
 
         let head = self
@@ -76,42 +87,76 @@ impl ReadBlobOperation {
             return Ok(ReadBlobOperationOutcome::Found(ReadBlobOperationResult {
                 meta,
                 body: None,
+                body_range: None,
             }));
         }
+
+        if meta.size_bytes == 0 {
+            if range.is_some() {
+                return Err(AmberError::InvalidRequest(
+                    "range not satisfiable for empty blob".to_string(),
+                ));
+            }
+
+            return Ok(ReadBlobOperationOutcome::Found(ReadBlobOperationResult {
+                meta,
+                body: Some(Bytes::new()),
+                body_range: None,
+            }));
+        }
+
+        let body_range = resolve_effective_range(meta.size_bytes, range)?;
+        let part_size = meta.part_size.max(1);
+
+        let first_part = body_range.start / part_size;
+        let last_part = body_range.end / part_size;
 
         let peer_nodes: Vec<NodeInfo> = replicas
             .into_iter()
             .filter(|node| node.node_id != local_node_id)
             .collect();
 
-        let mut body = Vec::with_capacity(meta.size_bytes as usize);
-        for part in &meta.parts {
-            let bytes = if self.part_store.part_exists(slot_id, &path, &part.sha256) {
-                match self.part_store.get_part(slot_id, &path, &part.sha256).await {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        tracing::warn!(
-                            "Failed to read local part. slot={} path={} sha={} error={}",
-                            slot_id,
-                            path,
-                            part.sha256,
-                            error
-                        );
-                        self.fetch_part_from_peers_and_store(&peer_nodes, slot_id, &path, part)
-                            .await?
-                    }
-                }
+        let mut body = Vec::with_capacity((body_range.end - body_range.start + 1) as usize);
+        for part_no_u64 in first_part..=last_part {
+            let part_no = u32::try_from(part_no_u64).map_err(|_| {
+                AmberError::Internal(format!("part index overflow: {}", part_no_u64))
+            })?;
+
+            let bytes = self
+                .read_part_bytes(&peer_nodes, slot_id, &path, &meta, part_no)
+                .await?;
+
+            let part_start = part_no_u64 * part_size;
+            let slice_start = if part_no_u64 == first_part {
+                (body_range.start - part_start) as usize
             } else {
-                self.fetch_part_from_peers_and_store(&peer_nodes, slot_id, &path, part)
-                    .await?
+                0
+            };
+            let slice_end_exclusive = if part_no_u64 == last_part {
+                ((body_range.end - part_start) + 1) as usize
+            } else {
+                bytes.len()
             };
 
-            body.extend_from_slice(&bytes);
+            if slice_start > slice_end_exclusive || slice_end_exclusive > bytes.len() {
+                return Err(AmberError::Internal(format!(
+                    "invalid part slice: path={} generation={} part_no={} start={} end={} len={}",
+                    path,
+                    meta.generation,
+                    part_no,
+                    slice_start,
+                    slice_end_exclusive,
+                    bytes.len()
+                )));
+            }
+
+            body.extend_from_slice(&bytes[slice_start..slice_end_exclusive]);
         }
 
         Ok(ReadBlobOperationOutcome::Found(ReadBlobOperationResult {
             meta,
             body: Some(Bytes::from(body)),
+            body_range: Some(body_range),
         }))
     }
 
@@ -206,16 +251,11 @@ impl ReadBlobOperation {
                 if meta.version == 0 {
                     meta.version = meta.generation;
                 }
-
-                for part in &mut meta.parts {
-                    if part.external_path.is_none() {
-                        if let Ok(part_path) =
-                            self.part_store.part_path(slot_id, path, &part.sha256)
-                        {
-                            part.external_path = Some(part_path.to_string_lossy().to_string());
-                        }
-                    }
-                    store.upsert_part_entry(path, part)?;
+                if meta.part_size == 0 {
+                    meta.part_size = PART_SIZE as u64;
+                }
+                if meta.part_count == 0 && meta.size_bytes > 0 {
+                    meta.part_count = meta.size_bytes.div_ceil(meta.part_size.max(1)) as u32;
                 }
 
                 let inline_data = serde_json::to_vec(&meta)?;
@@ -251,17 +291,38 @@ impl ReadBlobOperation {
                 .clone()
                 .ok_or_else(|| AmberError::Internal("missing meta payload".to_string()))?;
 
-            for part in &meta.parts {
-                if self.part_store.part_exists(slot_id, path, &part.sha256) {
+            let store = self.ensure_store(slot_id).await?;
+
+            for part_no in 0..meta.part_count {
+                let already_local = match store.get_part_entry(path, meta.generation, part_no)? {
+                    Some(entry) => {
+                        if let Some(external_path) = entry.external_path {
+                            Path::new(&external_path).exists()
+                        } else {
+                            self.part_store.part_exists(
+                                slot_id,
+                                path,
+                                meta.generation,
+                                part_no,
+                                &entry.sha256,
+                            )
+                        }
+                    }
+                    None => false,
+                };
+
+                if already_local {
                     continue;
                 }
 
-                let part_url = self.coordinator.internal_part_url(
+                let part_url = self.coordinator.internal_part_url_by_index(
                     &source.address,
                     slot_id,
-                    &part.sha256,
                     path,
+                    meta.generation,
+                    part_no,
                 )?;
+
                 let response = self
                     .coordinator
                     .client()
@@ -272,27 +333,42 @@ impl ReadBlobOperation {
 
                 if !response.status().is_success() {
                     return Err(AmberError::Http(format!(
-                        "failed to fetch part {} from source {}: {}",
-                        part.sha256,
+                        "failed to fetch part_no {} from source {}: {}",
+                        part_no,
                         source.node_id,
                         response.status()
                     )));
                 }
 
+                let headers = response.headers().clone();
                 let bytes = response
                     .bytes()
                     .await
                     .map_err(|error| AmberError::Http(error.to_string()))?;
 
+                let sha256 = resolve_part_sha256(Some(&headers), &bytes, None);
+
                 let put_result = self
                     .part_store
-                    .put_part(slot_id, path, &part.sha256, bytes)
+                    .put_part(
+                        slot_id,
+                        path,
+                        meta.generation,
+                        part_no,
+                        &sha256,
+                        bytes.clone(),
+                    )
                     .await?;
 
-                let store = self.ensure_store(slot_id).await?;
-                let mut local_part = part.clone();
-                local_part.external_path = Some(put_result.part_path.to_string_lossy().to_string());
-                store.upsert_part_entry(path, &local_part)?;
+                store.upsert_part_entry(
+                    path,
+                    meta.generation,
+                    part_no,
+                    &sha256,
+                    bytes.len() as u64,
+                    Some(put_result.part_path.to_string_lossy().as_ref()),
+                    None,
+                )?;
             }
         }
 
@@ -323,17 +399,111 @@ impl ReadBlobOperation {
         Ok(None)
     }
 
+    async fn read_part_bytes(
+        &self,
+        peers: &[NodeInfo],
+        slot_id: u16,
+        path: &str,
+        meta: &BlobMeta,
+        part_no: u32,
+    ) -> Result<Bytes> {
+        let store = self.ensure_store(slot_id).await?;
+
+        if let Some(entry) = store.get_part_entry(path, meta.generation, part_no)? {
+            if let Ok(local) = self
+                .read_local_part(
+                    slot_id,
+                    path,
+                    meta.generation,
+                    part_no,
+                    &entry.sha256,
+                    entry.external_path.as_deref(),
+                )
+                .await
+            {
+                return Ok(local);
+            }
+
+            return self
+                .fetch_part_from_peers_and_store(
+                    peers,
+                    slot_id,
+                    path,
+                    meta.generation,
+                    part_no,
+                    Some(entry.sha256.as_str()),
+                )
+                .await;
+        }
+
+        self.fetch_part_from_peers_and_store(peers, slot_id, path, meta.generation, part_no, None)
+            .await
+    }
+
+    async fn read_local_part(
+        &self,
+        slot_id: u16,
+        path: &str,
+        generation: i64,
+        part_no: u32,
+        sha256: &str,
+        external_path: Option<&str>,
+    ) -> Result<Bytes> {
+        if self
+            .part_store
+            .part_exists(slot_id, path, generation, part_no, sha256)
+        {
+            return self
+                .part_store
+                .get_part(slot_id, path, generation, part_no, sha256)
+                .await;
+        }
+
+        if let Some(external_path) = external_path {
+            if Path::new(external_path).exists() {
+                let bytes = tokio::fs::read(external_path).await?;
+                return Ok(Bytes::from(bytes));
+            }
+        }
+
+        Err(AmberError::PartNotFound(format!(
+            "path={} generation={} part_no={}",
+            path, generation, part_no
+        )))
+    }
+
     async fn fetch_part_from_peers_and_store(
         &self,
         peers: &[NodeInfo],
         slot_id: u16,
         path: &str,
-        part: &PartRef,
+        generation: i64,
+        part_no: u32,
+        expected_sha256: Option<&str>,
     ) -> Result<Bytes> {
         for peer in peers {
-            let part_url =
-                self.coordinator
-                    .internal_part_url(&peer.address, slot_id, &part.sha256, path)?;
+            let part_url = if let Some(sha256) = expected_sha256 {
+                self.coordinator.internal_part_url_by_sha(
+                    &peer.address,
+                    slot_id,
+                    sha256,
+                    path,
+                    generation,
+                    part_no,
+                )
+            } else {
+                self.coordinator.internal_part_url_by_index(
+                    &peer.address,
+                    slot_id,
+                    path,
+                    generation,
+                    part_no,
+                )
+            };
+
+            let Ok(part_url) = part_url else {
+                continue;
+            };
 
             let response = match self.coordinator.client().get(part_url).send().await {
                 Ok(response) => response,
@@ -344,25 +514,46 @@ impl ReadBlobOperation {
                 continue;
             }
 
+            let headers = response.headers().clone();
             let bytes = match response.bytes().await {
                 Ok(bytes) => bytes,
                 Err(_) => continue,
             };
 
-            let put_result = self
+            let sha256 = resolve_part_sha256(Some(&headers), &bytes, expected_sha256);
+            if let Some(expected_sha256) = expected_sha256 {
+                if sha256 != expected_sha256 {
+                    continue;
+                }
+            }
+
+            let put_result = match self
                 .part_store
-                .put_part(slot_id, path, &part.sha256, bytes.clone())
-                .await?;
+                .put_part(slot_id, path, generation, part_no, &sha256, bytes.clone())
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => continue,
+            };
 
             let store = self.ensure_store(slot_id).await?;
-            let mut local_part = part.clone();
-            local_part.external_path = Some(put_result.part_path.to_string_lossy().to_string());
-            store.upsert_part_entry(path, &local_part)?;
+            store.upsert_part_entry(
+                path,
+                generation,
+                part_no,
+                &sha256,
+                bytes.len() as u64,
+                Some(put_result.part_path.to_string_lossy().as_ref()),
+                None,
+            )?;
 
             return Ok(bytes);
         }
 
-        Err(AmberError::PartNotFound(part.sha256.clone()))
+        Err(AmberError::PartNotFound(format!(
+            "path={} generation={} part_no={}",
+            path, generation, part_no
+        )))
     }
 
     async fn ensure_store(&self, slot_id: u16) -> Result<MetadataStore> {
@@ -373,4 +564,56 @@ impl ReadBlobOperation {
         let slot = self.slot_manager.get_slot(slot_id).await?;
         MetadataStore::new(slot)
     }
+}
+
+fn resolve_effective_range(
+    size_bytes: u64,
+    requested: Option<ReadByteRange>,
+) -> Result<ReadByteRange> {
+    match requested {
+        Some(range) => {
+            if range.start > range.end || range.end >= size_bytes {
+                return Err(AmberError::InvalidRequest(format!(
+                    "range not satisfiable: start={} end={} size={}",
+                    range.start, range.end, size_bytes
+                )));
+            }
+            Ok(range)
+        }
+        None => Ok(ReadByteRange {
+            start: 0,
+            end: size_bytes - 1,
+        }),
+    }
+}
+
+fn resolve_part_sha256(
+    headers: Option<&HeaderMap>,
+    body: &[u8],
+    expected_sha256: Option<&str>,
+) -> String {
+    if let Some(headers) = headers {
+        if let Some(value) = headers.get("x-amberblob-sha256") {
+            if let Ok(value) = value.to_str() {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    let actual = compute_hash(body);
+                    if actual == trimmed {
+                        return trimmed.to_string();
+                    }
+                    return actual;
+                }
+            }
+        }
+    }
+
+    if let Some(expected) = expected_sha256 {
+        let actual = compute_hash(body);
+        if actual == expected {
+            return expected.to_string();
+        }
+        return actual;
+    }
+
+    compute_hash(body)
 }
