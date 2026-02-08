@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""[003] Internal API contract: bucket diff + targeted healing."""
+"""[003] Internal API contract: slotlet diff + targeted healing."""
 
 from __future__ import annotations
 
@@ -61,27 +61,27 @@ def main() -> None:
         if not isinstance(slot_id, int):
             raise AssertionError(f"resolve payload missing slot_id: {resolve_payload}")
 
-        # 5) Compare heal bucket summary between source and lagging nodes.
-        source_buckets = cluster.internal_request(
+        # 5) Compare heal slotlet summary between source and lagging nodes.
+        source_slotlets = cluster.internal_request(
             source_index,
             "GET",
-            f"/slots/{slot_id}/heal/buckets?prefix_len=2",
+            f"/slots/{slot_id}/heal/slotlets?prefix_len=2",
         )
-        expect_status(source_buckets.status, {200}, "source heal buckets")
-        source_payload = parse_json_body(source_buckets)
+        expect_status(source_slotlets.status, {200}, "source heal slotlets")
+        source_payload = parse_json_body(source_slotlets)
 
-        lagging_buckets = cluster.internal_request(
+        lagging_slotlets = cluster.internal_request(
             lagging_index,
             "GET",
-            f"/slots/{slot_id}/heal/buckets?prefix_len=2",
+            f"/slots/{slot_id}/heal/slotlets?prefix_len=2",
         )
-        expect_status(lagging_buckets.status, {200}, "lagging heal buckets")
-        lagging_payload = parse_json_body(lagging_buckets)
+        expect_status(lagging_slotlets.status, {200}, "lagging heal slotlets")
+        lagging_payload = parse_json_body(lagging_slotlets)
 
-        if not isinstance(source_payload.get("buckets"), list):
-            raise AssertionError(f"source buckets payload invalid: {source_payload}")
-        if not isinstance(lagging_payload.get("buckets"), list):
-            raise AssertionError(f"lagging buckets payload invalid: {lagging_payload}")
+        if not isinstance(source_payload.get("slotlets"), list):
+            raise AssertionError(f"source slotlets payload invalid: {source_payload}")
+        if not isinstance(lagging_payload.get("slotlets"), list):
+            raise AssertionError(f"lagging slotlets payload invalid: {lagging_payload}")
 
         # 6) Targeted repair from source to lagging node.
         repair_request_body = {

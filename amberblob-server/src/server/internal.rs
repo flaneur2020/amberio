@@ -1,5 +1,5 @@
 use super::{
-    HealBucket, HealBucketsQuery, HealBucketsResponse, HealHeadItem, HealHeadsRequest,
+    HealSlotlet, HealSlotletsQuery, HealSlotletsResponse, HealHeadItem, HealHeadsRequest,
     HealHeadsResponse, HealRepairRequest, HealRepairResponse, InternalHeadApplyRequest,
     InternalHeadApplyResponse, InternalHeadResponse, InternalPartPutResponse, InternalPathQuery,
     ServerState, ensure_store, normalize_blob_path, response_error,
@@ -327,10 +327,10 @@ pub(crate) async fn internal_get_head(
         .into_response()
 }
 
-pub(crate) async fn v1_internal_heal_buckets(
+pub(crate) async fn v1_internal_heal_slotlets(
     State(state): State<Arc<ServerState>>,
     Path(slot_id): Path<u16>,
-    Query(query): Query<HealBucketsQuery>,
+    Query(query): Query<HealSlotletsQuery>,
 ) -> impl IntoResponse {
     let store = match ensure_store(&state, slot_id).await {
         Ok(store) => store,
@@ -343,7 +343,7 @@ pub(crate) async fn v1_internal_heal_buckets(
     };
 
     let prefix_len = query.prefix_len.clamp(1, 8);
-    let mut buckets: BTreeMap<String, (u64, usize)> = BTreeMap::new();
+    let mut slotlets: BTreeMap<String, (u64, usize)> = BTreeMap::new();
 
     for head in heads {
         let hash = short_hash_hex(&head.path);
@@ -359,17 +359,17 @@ pub(crate) async fn v1_internal_heal_buckets(
             head.path, head.generation, head.head_sha256, kind
         );
 
-        let entry = buckets.entry(prefix).or_insert((0, 0));
+        let entry = slotlets.entry(prefix).or_insert((0, 0));
         entry.0 ^= fold_hash_u64(&digest_source);
         entry.1 += 1;
     }
 
-    let response = HealBucketsResponse {
+    let response = HealSlotletsResponse {
         slot_id,
         prefix_len,
-        buckets: buckets
+        slotlets: slotlets
             .into_iter()
-            .map(|(prefix, (digest, objects))| HealBucket {
+            .map(|(prefix, (digest, objects))| HealSlotlet {
                 prefix,
                 digest: format!("{:016x}", digest),
                 objects,

@@ -126,20 +126,20 @@ pub(crate) struct InternalHeadApplyResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct HealBucketsQuery {
-    #[serde(default = "default_bucket_prefix_len")]
+pub(crate) struct HealSlotletsQuery {
+    #[serde(default = "default_slotlet_prefix_len")]
     pub(crate) prefix_len: usize,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct HealBucketsResponse {
+pub(crate) struct HealSlotletsResponse {
     pub(crate) slot_id: u16,
     pub(crate) prefix_len: usize,
-    pub(crate) buckets: Vec<HealBucket>,
+    pub(crate) slotlets: Vec<HealSlotlet>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct HealBucket {
+pub(crate) struct HealSlotlet {
     pub(crate) prefix: String,
     pub(crate) digest: String,
     pub(crate) objects: usize,
@@ -190,6 +190,6 @@ fn default_limit() -> usize {
     100
 }
 
-fn default_bucket_prefix_len() -> usize {
+fn default_slotlet_prefix_len() -> usize {
     2
 }

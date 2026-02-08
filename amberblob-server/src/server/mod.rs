@@ -25,7 +25,7 @@ use external::{
 };
 use internal::{
     internal_get_head, internal_get_part, internal_put_head, internal_put_part,
-    v1_internal_heal_buckets, v1_internal_heal_heads, v1_internal_heal_repair,
+    v1_internal_heal_slotlets, v1_internal_heal_heads, v1_internal_heal_repair,
 };
 pub(crate) use types::*;
 
@@ -132,8 +132,8 @@ pub async fn run_server(config: Config) -> Result<()> {
             put(internal_put_head).get(internal_get_head),
         )
         .route(
-            "/internal/v1/slots/:slot_id/heal/buckets",
-            get(v1_internal_heal_buckets),
+            "/internal/v1/slots/:slot_id/heal/slotlets",
+            get(v1_internal_heal_slotlets),
         )
         .route(
             "/internal/v1/slots/:slot_id/heal/heads",

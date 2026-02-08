@@ -267,11 +267,11 @@ WHERE archive_url IS NOT NULL;
 
 - 对每个 `blob_path` 提取当前 head：`(head_kind, generation, head_sha256)`；
 - 将路径按前缀分桶（例如前 2 字节）；
-- 计算每个桶的 `bucket_digest`。
+- 计算每个 slotlet 的 `slotlet_digest`。
 
-#### 阶段 B：桶级 diff
+#### 阶段 B：slotlet 级 diff
 
-1. 与 peer 交换 `bucket_digest`。
+1. 与 peer 交换 `slotlet_digest`。
 2. 仅对不一致桶，交换该桶的 head 列表：
    - `blob_path -> (head_kind, generation, head_sha256)`。
 3. 对每个冲突路径做确定性裁决：
@@ -302,7 +302,7 @@ WHERE archive_url IS NOT NULL;
 
 - `anti_entropy_interval`: 30s
 - `anti_entropy_batch_objects`: 1000
-- `anti_entropy_bucket_prefix_len`: 2
+- `anti_entropy_slotlet_prefix_len`: 2
 - `repair_part_parallelism`: 8
 
 ---
@@ -530,7 +530,7 @@ RFC 0002 将 AmberBlob 的核心从“chunk/事务驱动”收敛为“对象路
 
 #### 3) Anti-Entropy / Healing
 
-- `GET /internal/v1/slots/{slot_id}/heal/buckets?prefix_len=2`
+- `GET /internal/v1/slots/{slot_id}/heal/slotlets?prefix_len=2`
   - 返回该 slot 的桶摘要。
   - `200 OK` 示例：
 
@@ -538,7 +538,7 @@ RFC 0002 将 AmberBlob 的核心从“chunk/事务驱动”收敛为“对象路
 {
   "slot_id": 731,
   "prefix_len": 2,
-  "buckets": [
+  "slotlets": [
     {"prefix": "0a", "digest": "f1...", "objects": 42}
   ]
 }
@@ -584,7 +584,7 @@ RFC 0002 将 AmberBlob 的核心从“chunk/事务驱动”收敛为“对象路
 ### 与核心流程的映射
 
 - 写入路径：`PUT /api/v1/blobs/*` -> 多次 `PUT /internal/.../parts/*` -> `PUT /internal/.../head`。
-- 反熵路径：`GET /internal/.../heal/buckets` -> `POST /internal/.../heal/heads` -> `POST /internal/.../heal/repair`。
+- 反熵路径：`GET /internal/.../heal/slotlets` -> `POST /internal/.../heal/heads` -> `POST /internal/.../heal/repair`。
 
 ---
 
@@ -623,7 +623,7 @@ integration/
 - `003_internal_healing.py`
   - 先下线一个节点制造数据滞后。
   - 写入对象后重启滞后节点。
-  - 通过 `heal/buckets + heal/repair` 修复并校验读取成功。
+  - 通过 `heal/slotlets + heal/repair` 修复并校验读取成功。
 
 ### 运行方式
 
