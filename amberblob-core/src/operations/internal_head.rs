@@ -1,0 +1,181 @@
+use crate::{
+    AmberError, BlobMeta, HeadKind, MetadataStore, PartStore, Result, SlotManager, TombstoneMeta,
+    compute_hash,
+};
+use chrono::Utc;
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct InternalHeadApplyOperation {
+    slot_manager: Arc<SlotManager>,
+    part_store: Arc<PartStore>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InternalHeadApplyOperationRequest {
+    pub slot_id: u16,
+    pub query_path: Option<String>,
+    pub head_kind: String,
+    pub generation: i64,
+    pub head_sha256: String,
+    pub meta: Option<BlobMeta>,
+    pub tombstone: Option<TombstoneMeta>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InternalHeadApplyOperationResult {
+    pub head_kind: String,
+    pub generation: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct InternalGetHeadOperationRequest {
+    pub slot_id: u16,
+    pub path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct InternalHeadRecord {
+    pub head_kind: HeadKind,
+    pub generation: i64,
+    pub head_sha256: String,
+    pub meta: Option<BlobMeta>,
+    pub tombstone: Option<TombstoneMeta>,
+}
+
+#[derive(Debug, Clone)]
+pub enum InternalGetHeadOperationOutcome {
+    Found(InternalHeadRecord),
+    NotFound,
+}
+
+impl InternalHeadApplyOperation {
+    pub fn new(slot_manager: Arc<SlotManager>, part_store: Arc<PartStore>) -> Self {
+        Self {
+            slot_manager,
+            part_store,
+        }
+    }
+
+    pub async fn run_apply(
+        &self,
+        request: InternalHeadApplyOperationRequest,
+    ) -> Result<InternalHeadApplyOperationResult> {
+        let InternalHeadApplyOperationRequest {
+            slot_id,
+            query_path,
+            head_kind,
+            generation,
+            head_sha256,
+            meta,
+            tombstone,
+        } = request;
+
+        let store = self.ensure_store(slot_id).await?;
+
+        match head_kind.as_str() {
+            "meta" => {
+                let mut meta = meta.ok_or_else(|| {
+                    AmberError::InvalidRequest("meta payload is required".to_string())
+                })?;
+
+                if let Some(path) = query_path {
+                    meta.path = path;
+                }
+
+                meta.slot_id = slot_id;
+                meta.generation = generation;
+                if meta.version == 0 {
+                    meta.version = meta.generation;
+                }
+                meta.updated_at = Utc::now();
+
+                for part in &mut meta.parts {
+                    if part.external_path.is_none() {
+                        if let Ok(part_path) =
+                            self.part_store.part_path(slot_id, &meta.path, &part.sha256)
+                        {
+                            part.external_path = Some(part_path.to_string_lossy().to_string());
+                        }
+                    }
+                    store.upsert_part_entry(&meta.path, part)?;
+                }
+
+                let inline_data = serde_json::to_vec(&meta)?;
+                let head_sha = if head_sha256.is_empty() {
+                    compute_hash(&inline_data)
+                } else {
+                    head_sha256
+                };
+
+                store.upsert_meta_with_payload(&meta, &inline_data, &head_sha)?;
+
+                Ok(InternalHeadApplyOperationResult {
+                    head_kind: "meta".to_string(),
+                    generation: meta.generation,
+                })
+            }
+            "tombstone" => {
+                let mut tombstone = tombstone.ok_or_else(|| {
+                    AmberError::InvalidRequest("tombstone payload is required".to_string())
+                })?;
+
+                if let Some(path) = query_path {
+                    tombstone.path = path;
+                }
+
+                tombstone.slot_id = slot_id;
+                tombstone.generation = generation;
+                tombstone.deleted_at = Utc::now();
+
+                let inline_data = serde_json::to_vec(&tombstone)?;
+                let head_sha = if head_sha256.is_empty() {
+                    compute_hash(&inline_data)
+                } else {
+                    head_sha256
+                };
+
+                store.insert_tombstone_with_payload(&tombstone, &inline_data, &head_sha)?;
+
+                Ok(InternalHeadApplyOperationResult {
+                    head_kind: "tombstone".to_string(),
+                    generation: tombstone.generation,
+                })
+            }
+            _ => Err(AmberError::InvalidRequest(
+                "head_kind must be meta or tombstone".to_string(),
+            )),
+        }
+    }
+
+    pub async fn run_get(
+        &self,
+        request: InternalGetHeadOperationRequest,
+    ) -> Result<InternalGetHeadOperationOutcome> {
+        let InternalGetHeadOperationRequest { slot_id, path } = request;
+
+        let store = self.ensure_store(slot_id).await?;
+        let head = store.get_current_head(&path)?;
+
+        let Some(head) = head else {
+            return Ok(InternalGetHeadOperationOutcome::NotFound);
+        };
+
+        Ok(InternalGetHeadOperationOutcome::Found(InternalHeadRecord {
+            head_kind: head.head_kind,
+            generation: head.generation,
+            head_sha256: head.head_sha256,
+            meta: head.meta,
+            tombstone: head.tombstone,
+        }))
+    }
+
+    async fn ensure_store(&self, slot_id: u16) -> Result<MetadataStore> {
+        if !self.slot_manager.has_slot(slot_id).await {
+            self.slot_manager.init_slot(slot_id).await?;
+        }
+
+        let slot = self.slot_manager.get_slot(slot_id).await?;
+        MetadataStore::new(slot)
+    }
+}

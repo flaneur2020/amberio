@@ -1,7 +1,9 @@
 use crate::config::{Config, RegistryBackend};
 use amberblob_core::{
-    AmberError, Coordinator, EtcdRegistry, MetadataStore, Node, NodeInfo, PartStore,
-    PutBlobOperation, RedisRegistry, Registry, Result,
+    AmberError, Coordinator, DeleteBlobOperation, EtcdRegistry, HealHeadsOperation,
+    HealRepairOperation, HealSlotletsOperation, InternalHeadApplyOperation, InternalPartOperation,
+    ListBlobsOperation, Node, NodeInfo, PartStore, PutBlobOperation, ReadBlobOperation,
+    RedisRegistry, Registry, Result,
 };
 use axum::{
     Json, Router,
@@ -31,12 +33,18 @@ pub(crate) use types::*;
 
 pub struct ServerState {
     pub(crate) node: Arc<Node>,
-    pub(crate) slot_manager: Arc<amberblob_core::SlotManager>,
-    pub(crate) part_store: Arc<PartStore>,
     pub(crate) registry: Arc<dyn Registry>,
     pub(crate) config: Config,
     pub(crate) coordinator: Arc<Coordinator>,
     pub(crate) put_blob_operation: Arc<PutBlobOperation>,
+    pub(crate) read_blob_operation: Arc<ReadBlobOperation>,
+    pub(crate) delete_blob_operation: Arc<DeleteBlobOperation>,
+    pub(crate) list_blobs_operation: Arc<ListBlobsOperation>,
+    pub(crate) internal_part_operation: Arc<InternalPartOperation>,
+    pub(crate) internal_head_operation: Arc<InternalHeadApplyOperation>,
+    pub(crate) heal_slotlets_operation: Arc<HealSlotletsOperation>,
+    pub(crate) heal_heads_operation: Arc<HealHeadsOperation>,
+    pub(crate) heal_repair_operation: Arc<HealRepairOperation>,
     pub(crate) idempotent_puts: Arc<RwLock<HashMap<String, PutCacheEntry>>>,
 }
 
@@ -91,15 +99,42 @@ pub async fn run_server(config: Config) -> Result<()> {
         part_store.clone(),
         coordinator.clone(),
     ));
+    let read_blob_operation = Arc::new(ReadBlobOperation::new(
+        slot_manager.clone(),
+        part_store.clone(),
+        coordinator.clone(),
+    ));
+    let delete_blob_operation = Arc::new(DeleteBlobOperation::new(
+        slot_manager.clone(),
+        coordinator.clone(),
+    ));
+    let list_blobs_operation = Arc::new(ListBlobsOperation::new(slot_manager.clone()));
+    let internal_part_operation = Arc::new(InternalPartOperation::new(
+        slot_manager.clone(),
+        part_store.clone(),
+    ));
+    let internal_head_operation = Arc::new(InternalHeadApplyOperation::new(
+        slot_manager.clone(),
+        part_store.clone(),
+    ));
+    let heal_slotlets_operation = Arc::new(HealSlotletsOperation::new(slot_manager.clone()));
+    let heal_heads_operation = Arc::new(HealHeadsOperation::new(slot_manager.clone()));
+    let heal_repair_operation = Arc::new(HealRepairOperation::new(read_blob_operation.clone()));
 
     let state = Arc::new(ServerState {
         node,
-        slot_manager,
-        part_store,
         registry,
         config,
         coordinator,
         put_blob_operation,
+        read_blob_operation,
+        delete_blob_operation,
+        list_blobs_operation,
+        internal_part_operation,
+        internal_head_operation,
+        heal_slotlets_operation,
+        heal_heads_operation,
+        heal_repair_operation,
         idempotent_puts: Arc::new(RwLock::new(HashMap::new())),
     });
 
@@ -166,15 +201,6 @@ pub async fn run_server(config: Config) -> Result<()> {
 pub(crate) async fn register_local_node(state: &ServerState) -> Result<()> {
     let info = state.node.info().await;
     state.registry.register_node(&info).await
-}
-
-pub(crate) async fn ensure_store(state: &ServerState, slot_id: u16) -> Result<MetadataStore> {
-    if !state.slot_manager.has_slot(slot_id).await {
-        state.slot_manager.init_slot(slot_id).await?;
-    }
-
-    let slot = state.slot_manager.get_slot(slot_id).await?;
-    MetadataStore::new(slot)
 }
 
 pub(crate) async fn current_nodes(state: &ServerState) -> Result<Vec<NodeInfo>> {
