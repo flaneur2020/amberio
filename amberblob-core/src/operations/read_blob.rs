@@ -4,7 +4,7 @@ use crate::{
 };
 use bytes::Bytes;
 use chrono::Utc;
-use reqwest::header::HeaderMap;
+use reqwest::{Url, header::HeaderMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -424,6 +424,34 @@ impl ReadBlobOperation {
                 return Ok(local);
             }
 
+            if let Some(archive_url) = entry.archive_url.as_deref().or(meta.archive_url.as_deref())
+            {
+                match self
+                    .fetch_part_from_archive_and_store(
+                        slot_id,
+                        path,
+                        meta,
+                        part_no,
+                        Some(entry.sha256.as_str()),
+                        archive_url,
+                    )
+                    .await
+                {
+                    Ok(bytes) => return Ok(bytes),
+                    Err(error) => {
+                        tracing::warn!(
+                            "archive fallback failed. slot={} path={} generation={} part_no={} archive_url={} error={}",
+                            slot_id,
+                            path,
+                            meta.generation,
+                            part_no,
+                            archive_url,
+                            error
+                        );
+                    }
+                }
+            }
+
             return self
                 .fetch_part_from_peers_and_store(
                     peers,
@@ -434,6 +462,26 @@ impl ReadBlobOperation {
                     Some(entry.sha256.as_str()),
                 )
                 .await;
+        }
+
+        if let Some(archive_url) = meta.archive_url.as_deref() {
+            match self
+                .fetch_part_from_archive_and_store(slot_id, path, meta, part_no, None, archive_url)
+                .await
+            {
+                Ok(bytes) => return Ok(bytes),
+                Err(error) => {
+                    tracing::warn!(
+                        "archive fallback failed without local index. slot={} path={} generation={} part_no={} archive_url={} error={}",
+                        slot_id,
+                        path,
+                        meta.generation,
+                        part_no,
+                        archive_url,
+                        error
+                    );
+                }
+            }
         }
 
         self.fetch_part_from_peers_and_store(peers, slot_id, path, meta.generation, part_no, None)
@@ -470,6 +518,66 @@ impl ReadBlobOperation {
             "path={} generation={} part_no={}",
             path, generation, part_no
         )))
+    }
+
+    async fn fetch_part_from_archive_and_store(
+        &self,
+        slot_id: u16,
+        path: &str,
+        meta: &BlobMeta,
+        part_no: u32,
+        expected_sha256: Option<&str>,
+        archive_url: &str,
+    ) -> Result<Bytes> {
+        let (range_start, range_end) = part_byte_range(meta, part_no)?;
+        let bytes = fetch_archive_range_bytes(archive_url, range_start, range_end).await?;
+
+        let expected_length = (range_end - range_start + 1) as usize;
+        if bytes.len() != expected_length {
+            return Err(AmberError::Internal(format!(
+                "archive range length mismatch: archive_url={} path={} part_no={} expected={} actual={}",
+                archive_url,
+                path,
+                part_no,
+                expected_length,
+                bytes.len()
+            )));
+        }
+
+        let sha256 = resolve_part_sha256(None, &bytes, expected_sha256);
+        if let Some(expected) = expected_sha256 {
+            if sha256 != expected {
+                return Err(AmberError::HashMismatch {
+                    expected: expected.to_string(),
+                    actual: sha256,
+                });
+            }
+        }
+
+        let put_result = self
+            .part_store
+            .put_part(
+                slot_id,
+                path,
+                meta.generation,
+                part_no,
+                &sha256,
+                bytes.clone(),
+            )
+            .await?;
+
+        let store = self.ensure_store(slot_id).await?;
+        store.upsert_part_entry(
+            path,
+            meta.generation,
+            part_no,
+            &sha256,
+            bytes.len() as u64,
+            Some(put_result.part_path.to_string_lossy().as_ref()),
+            Some(archive_url),
+        )?;
+
+        Ok(bytes)
     }
 
     async fn fetch_part_from_peers_and_store(
@@ -616,4 +724,132 @@ fn resolve_part_sha256(
     }
 
     compute_hash(body)
+}
+
+fn part_byte_range(meta: &BlobMeta, part_no: u32) -> Result<(u64, u64)> {
+    let part_size = meta.part_size.max(1);
+    let start = part_no as u64 * part_size;
+    if start >= meta.size_bytes {
+        return Err(AmberError::InvalidRequest(format!(
+            "part_no out of range: part_no={} size_bytes={} part_size={}",
+            part_no, meta.size_bytes, part_size
+        )));
+    }
+
+    let end = (start + part_size - 1).min(meta.size_bytes - 1);
+    Ok((start, end))
+}
+
+async fn fetch_archive_range_bytes(archive_url: &str, start: u64, end: u64) -> Result<Bytes> {
+    let parsed = Url::parse(archive_url)
+        .map_err(|error| AmberError::InvalidRequest(format!("invalid archive_url: {}", error)))?;
+
+    match parsed.scheme() {
+        "redis" => fetch_redis_archive_range_bytes(&parsed, start, end).await,
+        "s3" => Err(AmberError::Internal(
+            "archive_url with s3:// is not implemented yet".to_string(),
+        )),
+        scheme => Err(AmberError::InvalidRequest(format!(
+            "unsupported archive_url scheme: {}",
+            scheme
+        ))),
+    }
+}
+
+async fn fetch_redis_archive_range_bytes(parsed: &Url, start: u64, end: u64) -> Result<Bytes> {
+    let (redis_url, key) = parse_redis_archive_url(parsed)?;
+
+    let client = redis::Client::open(redis_url.as_str())
+        .map_err(|error| AmberError::Internal(format!("redis archive init failed: {}", error)))?;
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|error| {
+            AmberError::Internal(format!("redis archive connect failed: {}", error))
+        })?;
+
+    let start_i64 = i64::try_from(start)
+        .map_err(|_| AmberError::Internal(format!("invalid redis range start: {}", start)))?;
+    let end_i64 = i64::try_from(end)
+        .map_err(|_| AmberError::Internal(format!("invalid redis range end: {}", end)))?;
+
+    let payload: Vec<u8> = redis::cmd("GETRANGE")
+        .arg(&key)
+        .arg(start_i64)
+        .arg(end_i64)
+        .query_async(&mut conn)
+        .await
+        .map_err(|error| {
+            AmberError::Internal(format!("redis archive GETRANGE failed: {}", error))
+        })?;
+
+    Ok(Bytes::from(payload))
+}
+
+fn parse_redis_archive_url(parsed: &Url) -> Result<(String, String)> {
+    if parsed.scheme() != "redis" {
+        return Err(AmberError::InvalidRequest(format!(
+            "not a redis archive url: {}",
+            parsed
+        )));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AmberError::InvalidRequest("redis archive_url missing host".to_string()))?;
+    let port = parsed.port().unwrap_or(6379);
+
+    let raw_segments: Vec<&str> = parsed
+        .path()
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    if raw_segments.is_empty() {
+        return Err(AmberError::InvalidRequest(
+            "redis archive_url missing object key".to_string(),
+        ));
+    }
+
+    let (db_segment, key_segments): (Option<&str>, Vec<&str>) =
+        if raw_segments.len() >= 2 && raw_segments[0].chars().all(|char| char.is_ascii_digit()) {
+            (Some(raw_segments[0]), raw_segments[1..].to_vec())
+        } else {
+            (None, raw_segments)
+        };
+
+    if key_segments.is_empty() {
+        return Err(AmberError::InvalidRequest(
+            "redis archive_url missing object key".to_string(),
+        ));
+    }
+
+    let key = key_segments.join("/");
+
+    let mut redis_url = String::from("redis://");
+    if !parsed.username().is_empty() {
+        redis_url.push_str(parsed.username());
+        if let Some(password) = parsed.password() {
+            redis_url.push(':');
+            redis_url.push_str(password);
+        }
+        redis_url.push('@');
+    }
+
+    redis_url.push_str(host);
+    redis_url.push(':');
+    redis_url.push_str(&port.to_string());
+
+    if let Some(db_segment) = db_segment {
+        redis_url.push('/');
+        redis_url.push_str(db_segment);
+    }
+
+    if let Some(query) = parsed.query() {
+        redis_url.push('?');
+        redis_url.push_str(query);
+    }
+
+    Ok((redis_url, key))
 }
