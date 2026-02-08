@@ -47,6 +47,18 @@ class NodeRuntime:
     log_handle: Optional[object] = None
 
 
+@dataclass
+class TraceEvent:
+    kind: str
+    path: str
+    write_id: str
+    etag: str
+    generation: int
+    committed_replicas: int
+    quorum_reached: bool
+    from_cache: bool
+
+
 class AmberCluster:
     def __init__(
         self,
@@ -72,6 +84,7 @@ class AmberCluster:
         self.internal_prefix = _normalize_prefix(internal_prefix)
         self.keep_artifacts = keep_artifacts
         self.build_if_missing = build_if_missing
+        self.trace_events: List[TraceEvent] = []
 
         self.run_id = f"it-{int(time.time())}-{uuid.uuid4().hex[:6]}"
         self.group_id = f"amberio-{self.run_id}"
@@ -132,7 +145,37 @@ class AmberCluster:
     ) -> HttpResponse:
         path = _normalize_suffix(path_and_query)
         url = f"{self.node_url(node_index)}{self.api_prefix}{path}"
-        return http_request(method, url, body=body, headers=headers, timeout=timeout)
+        response = http_request(method, url, body=body, headers=headers, timeout=timeout)
+
+        method_upper = method.upper()
+        path_only = path.split("?", 1)[0]
+
+        if method_upper in {"PUT", "DELETE"} and path_only.startswith("/blobs/"):
+            self._capture_write_trace_event(
+                method=method_upper,
+                normalized_path=path,
+                request_headers=headers,
+                response=response,
+            )
+
+        return response
+
+    def write_trace_json(self, output_path: Path) -> None:
+        payload = [
+            {
+                "kind": event.kind,
+                "path": event.path,
+                "write_id": event.write_id,
+                "etag": event.etag,
+                "generation": event.generation,
+                "committed_replicas": event.committed_replicas,
+                "quorum_reached": event.quorum_reached,
+                "from_cache": event.from_cache,
+            }
+            for event in self.trace_events
+        ]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def internal_request(
         self,
@@ -228,6 +271,99 @@ class AmberCluster:
             f"  min_write_replicas: {self.min_write_replicas}\n"
             f"  total_slots: {self.total_slots}\n"
         )
+
+    def _capture_write_trace_event(
+        self,
+        *,
+        method: str,
+        normalized_path: str,
+        request_headers: Optional[Dict[str, str]],
+        response: HttpResponse,
+    ) -> None:
+        if response.status == 0:
+            return
+
+        slash = normalized_path.find("/blobs/")
+        if slash < 0:
+            return
+
+        suffix = normalized_path[slash + len("/blobs/") :]
+        blob_path = parse.unquote(suffix.split("?", 1)[0])
+        if not blob_path:
+            return
+
+        request_headers = request_headers or {}
+
+        def _header_get(name: str) -> str:
+            for key, value in request_headers.items():
+                if key.lower() == name:
+                    return value
+            return ""
+
+        if method == "PUT":
+            if response.status not in {200, 201}:
+                return
+
+            payload = parse_json_body(response)
+            generation = payload.get("generation")
+            committed = payload.get("committed_replicas")
+            etag = payload.get("etag")
+
+            if not isinstance(generation, int):
+                return
+            if not isinstance(committed, int):
+                return
+            if not isinstance(etag, str):
+                return
+
+            write_id = _header_get("x-amberio-write-id")
+            if not write_id:
+                write_id = f"auto-put-g{generation}"
+
+            from_cache = bool(payload.get("idempotent_replay") is True)
+            kind = "put_retry" if from_cache else "put"
+
+            self.trace_events.append(
+                TraceEvent(
+                    kind=kind,
+                    path=blob_path,
+                    write_id=write_id,
+                    etag=etag,
+                    generation=generation,
+                    committed_replicas=max(1, committed),
+                    quorum_reached=True,
+                    from_cache=from_cache,
+                )
+            )
+
+        elif method == "DELETE":
+            if response.status not in {200, 204}:
+                return
+
+            write_id = _header_get("x-amberio-write-id") or "auto-delete"
+
+            generation = self._latest_generation_for_path(blob_path) + 1
+            committed = max(self.min_write_replicas, 1)
+
+            self.trace_events.append(
+                TraceEvent(
+                    kind="delete",
+                    path=blob_path,
+                    write_id=write_id,
+                    etag="none",
+                    generation=generation,
+                    committed_replicas=committed,
+                    quorum_reached=True,
+                    from_cache=False,
+                )
+            )
+
+    def _latest_generation_for_path(self, blob_path: str) -> int:
+        latest = 0
+        for event in self.trace_events:
+            if event.path == blob_path and event.generation > latest:
+                latest = event.generation
+        return latest
 
     def _start_node(self, node: NodeRuntime) -> None:
         node.log_path.parent.mkdir(parents=True, exist_ok=True)

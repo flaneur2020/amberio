@@ -19,11 +19,25 @@ python3 integration/run_all.py --build-if-missing
 python3 integration/002_external_blob_crud.py --build-if-missing
 ```
 
-RFC003-related cases currently use normal numeric prefixes and run via `run_all.py`:
+## TLA+ trace case
 
-- `004_rfc003_file_entries_schema.py`
-- `005_rfc003_put_layout_contract.py`
-- `006_rfc003_range_read_without_parts.py`
+Case `008_tla_trace_check.py` generates a real write/delete trace from a live
+cluster run and saves it as JSON. You can optionally validate this trace
+against a TLA+ replay spec with TLC.
+
+Generate trace only:
+
+```bash
+python3 integration/008_tla_trace_check.py --build-if-missing
+```
+
+Generate trace + check with TLC:
+
+```bash
+python3 integration/008_tla_trace_check.py \
+  --build-if-missing \
+  --tlc-jar /path/to/tla2tools.jar
+```
 
 ## Notes
 

@@ -12,6 +12,23 @@ Amberio features:
 - TLA+ proof of correctness
 - S3 Compatibility (in development)
 
+## TLA+
+
+Amberio includes TLA+ specs and a trace-based checking workflow:
+
+- Specs are under `tla/`
+- Trace checker script is `scripts/tla/check_trace.py`
+- Integration case `integration/008_tla_trace_check.py` can emit real runtime
+  traces and optionally verify them with TLC
+
+Quick example:
+
+```bash
+python3 integration/008_tla_trace_check.py \
+  --build-if-missing \
+  --tlc-jar /path/to/tla2tools.jar
+```
+
 ## Quick Start
 
 1. Start Redis (for example, `redis://127.0.0.1:6379`)
