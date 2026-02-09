@@ -1,10 +1,10 @@
 use crate::config::{ArchiveConfig, RuntimeConfig};
 use amberio_core::{
-    AmberError, ClusterClient, Coordinator, DeleteBlobOperation, HealHeadsOperation,
+    AmberError, ArchiveStore, ClusterClient, Coordinator, DeleteBlobOperation, HealHeadsOperation,
     HealRepairOperation, HealSlotletsOperation, InternalGetHeadOperation, InternalGetPartOperation,
     InternalPutHeadOperation, InternalPutPartOperation, ListBlobsOperation, Node, NodeInfo,
     PartStore, PutBlobArchiveWriter, PutBlobOperation, ReadBlobOperation, RedisArchiveStore,
-    Registry, Result,
+    Registry, Result, S3ArchiveStore, set_default_s3_archive_store,
 };
 use axum::{
     Json, Router,
@@ -82,7 +82,14 @@ pub async fn run_server(config: RuntimeConfig, registry: Arc<dyn Registry>) -> R
 
     let coordinator = Arc::new(Coordinator::new(config.replication.min_write_replicas));
     let cluster_client = Arc::new(ClusterClient::new(registry.clone()));
-    let archive_writer = build_archive_writer(config.archive.as_ref())?;
+
+    let (runtime_archive_store, archive_key_prefix) =
+        build_runtime_archive(config.archive.as_ref())?;
+    let archive_writer = runtime_archive_store.as_ref().and_then(|store| {
+        archive_key_prefix
+            .as_ref()
+            .map(|prefix| PutBlobArchiveWriter::new(store.clone(), prefix.clone()))
+    });
 
     let put_blob_operation = Arc::new(PutBlobOperation::new(
         slot_manager.clone(),
@@ -197,9 +204,11 @@ pub async fn run_server(config: RuntimeConfig, registry: Arc<dyn Registry>) -> R
     Ok(())
 }
 
-fn build_archive_writer(config: Option<&ArchiveConfig>) -> Result<Option<PutBlobArchiveWriter>> {
+fn build_runtime_archive(
+    config: Option<&ArchiveConfig>,
+) -> Result<(Option<Arc<dyn ArchiveStore>>, Option<String>)> {
     let Some(config) = config else {
-        return Ok(None);
+        return Ok((None, None));
     };
 
     if config.archive_type.eq_ignore_ascii_case("redis") {
@@ -207,16 +216,25 @@ fn build_archive_writer(config: Option<&ArchiveConfig>) -> Result<Option<PutBlob
             AmberError::Config("archive.redis is required when archive_type=redis".to_string())
         })?;
 
-        let store = Arc::new(RedisArchiveStore::new(redis.url.as_str())?);
-        return Ok(Some(PutBlobArchiveWriter::new(
-            store,
-            redis.key_prefix.clone(),
-        )));
+        let store: Arc<dyn ArchiveStore> = Arc::new(RedisArchiveStore::new(redis.url.as_str())?);
+        return Ok((Some(store), Some(redis.key_prefix.clone())));
     }
 
     if config.archive_type.eq_ignore_ascii_case("s3") {
-        tracing::warn!("archive_type=s3 is configured but write-through is not implemented yet");
-        return Ok(None);
+        let s3 = config.s3.as_ref().ok_or_else(|| {
+            AmberError::Config("archive.s3 is required when archive_type=s3".to_string())
+        })?;
+
+        let s3_store = Arc::new(S3ArchiveStore::new(
+            s3.bucket.as_str(),
+            s3.region.as_str(),
+            s3.credentials.access_key_id.as_str(),
+            s3.credentials.secret_access_key.as_str(),
+        )?);
+        set_default_s3_archive_store(s3_store.clone());
+
+        let store: Arc<dyn ArchiveStore> = s3_store;
+        return Ok((Some(store), Some("amberio/archive".to_string())));
     }
 
     Err(AmberError::Config(format!(

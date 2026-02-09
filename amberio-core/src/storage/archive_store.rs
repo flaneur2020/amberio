@@ -1,8 +1,13 @@
 use crate::{AmberError, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::StreamExt;
+use object_store::ObjectStore;
+use object_store::aws::AmazonS3Builder;
+use object_store::path::Path as ObjectPath;
 use redis::AsyncCommands;
 use reqwest::Url;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone)]
 pub struct ArchiveListPage {
@@ -96,6 +101,11 @@ impl ArchiveStore for RedisArchiveStore {
             .unwrap_or(0);
 
         let end = start + (limit - 1);
+        let start_isize = isize::try_from(start).map_err(|_| {
+            AmberError::InvalidRequest(format!("archive list cursor too large: {}", start))
+        })?;
+        let end_isize = isize::try_from(end)
+            .map_err(|_| AmberError::InvalidRequest(format!("archive page too large: {}", end)))?;
 
         let mut conn = self
             .client
@@ -106,7 +116,7 @@ impl ArchiveStore for RedisArchiveStore {
             })?;
 
         let entries: Vec<String> = conn
-            .lrange(list_key, start as isize, end as isize)
+            .lrange(list_key, start_isize, end_isize)
             .await
             .map_err(|error| {
                 AmberError::Internal(format!("archive redis LRANGE failed: {}", error))
@@ -173,6 +183,189 @@ impl ArchiveStore for RedisArchiveStore {
     }
 }
 
+pub struct S3ArchiveStore {
+    store: Arc<dyn ObjectStore>,
+    bucket: String,
+}
+
+impl S3ArchiveStore {
+    pub fn new(
+        bucket: &str,
+        region: &str,
+        access_key_id: &str,
+        secret_access_key: &str,
+    ) -> Result<Self> {
+        let bucket_trimmed = bucket.trim();
+        if bucket_trimmed.is_empty() {
+            return Err(AmberError::Config(
+                "archive s3 bucket cannot be empty".to_string(),
+            ));
+        }
+
+        let region_trimmed = region.trim();
+        if region_trimmed.is_empty() {
+            return Err(AmberError::Config(
+                "archive s3 region cannot be empty".to_string(),
+            ));
+        }
+
+        let store = AmazonS3Builder::new()
+            .with_bucket_name(bucket_trimmed)
+            .with_region(region_trimmed)
+            .with_access_key_id(access_key_id)
+            .with_secret_access_key(secret_access_key)
+            .build()
+            .map_err(|error| AmberError::Config(format!("archive s3 config error: {}", error)))?;
+
+        Ok(Self {
+            store: Arc::new(store),
+            bucket: bucket_trimmed.to_string(),
+        })
+    }
+
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    fn object_path(&self, object_key: &str) -> Result<ObjectPath> {
+        let key = object_key.trim_matches('/');
+        if key.is_empty() {
+            return Err(AmberError::InvalidRequest(
+                "archive object key cannot be empty".to_string(),
+            ));
+        }
+
+        ObjectPath::parse(key).map_err(|error| {
+            AmberError::InvalidRequest(format!(
+                "invalid archive object key '{}': {}",
+                object_key, error
+            ))
+        })
+    }
+}
+
+#[async_trait]
+impl ArchiveStore for S3ArchiveStore {
+    async fn list_blobs_page(
+        &self,
+        list_key: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<ArchiveListPage> {
+        if limit == 0 {
+            return Ok(ArchiveListPage {
+                entries: Vec::new(),
+                next_cursor: None,
+            });
+        }
+
+        let offset = cursor
+            .map(|value| {
+                value.parse::<usize>().map_err(|_| {
+                    AmberError::InvalidRequest(format!(
+                        "invalid archive list cursor '{}': expected numeric offset",
+                        value
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or(0);
+
+        let prefix = list_key.trim_matches('/');
+        let prefix_path = if prefix.is_empty() {
+            None
+        } else {
+            Some(ObjectPath::from(prefix.to_string()))
+        };
+
+        let mut stream = self.store.list(prefix_path.as_ref());
+
+        let mut skipped = 0usize;
+        let mut entries = Vec::with_capacity(limit);
+        let mut has_more = false;
+
+        while let Some(item) = stream.next().await {
+            let meta = item.map_err(|error| {
+                AmberError::Internal(format!("archive s3 list failed: {}", error))
+            })?;
+
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+
+            if entries.len() < limit {
+                entries.push(meta.location.to_string());
+                continue;
+            }
+
+            has_more = true;
+            break;
+        }
+
+        let next_cursor = if has_more {
+            Some((offset + entries.len()).to_string())
+        } else {
+            None
+        };
+
+        Ok(ArchiveListPage {
+            entries,
+            next_cursor,
+        })
+    }
+
+    async fn read_range(&self, object_key: &str, start: u64, end: u64) -> Result<Bytes> {
+        if end < start {
+            return Err(AmberError::InvalidRequest(format!(
+                "invalid archive range: start={} end={}",
+                start, end
+            )));
+        }
+
+        let path = self.object_path(object_key)?;
+        let start_usize = usize::try_from(start).map_err(|_| {
+            AmberError::InvalidRequest(format!("archive range start too large: {}", start))
+        })?;
+        let end_exclusive_u64 = end
+            .checked_add(1)
+            .ok_or_else(|| AmberError::InvalidRequest("archive range overflow".to_string()))?;
+        let end_exclusive = usize::try_from(end_exclusive_u64).map_err(|_| {
+            AmberError::InvalidRequest(format!("archive range end too large: {}", end))
+        })?;
+
+        self.store
+            .get_range(&path, start_usize..end_exclusive)
+            .await
+            .map_err(|error| {
+                AmberError::Internal(format!("archive s3 get_range failed: {}", error))
+            })
+    }
+
+    async fn write_blob(&self, object_key: &str, body: &[u8]) -> Result<()> {
+        let path = self.object_path(object_key)?;
+        let payload = Bytes::copy_from_slice(body);
+
+        self.store
+            .put(&path, payload.into())
+            .await
+            .map_err(|error| AmberError::Internal(format!("archive s3 put failed: {}", error)))?;
+
+        Ok(())
+    }
+
+    fn archive_url_for_key(&self, object_key: &str) -> String {
+        let key = object_key.trim_start_matches('/');
+        format!("s3://{}/{}", self.bucket, key)
+    }
+}
+
+static DEFAULT_S3_ARCHIVE_STORE: OnceLock<Arc<S3ArchiveStore>> = OnceLock::new();
+
+pub fn set_default_s3_archive_store(store: Arc<S3ArchiveStore>) {
+    let _ = DEFAULT_S3_ARCHIVE_STORE.set(store);
+}
+
 pub async fn read_archive_range_bytes(archive_url: &str, start: u64, end: u64) -> Result<Bytes> {
     let parsed = Url::parse(archive_url)
         .map_err(|error| AmberError::InvalidRequest(format!("invalid archive_url: {}", error)))?;
@@ -183,9 +376,22 @@ pub async fn read_archive_range_bytes(archive_url: &str, start: u64, end: u64) -
             let store = RedisArchiveStore::new(redis_url.as_str())?;
             store.read_range(&key, start, end).await
         }
-        "s3" => Err(AmberError::Internal(
-            "archive_url with s3:// is not implemented yet".to_string(),
-        )),
+        "s3" => {
+            let (bucket, key) = parse_s3_archive_url(&parsed)?;
+            let store = DEFAULT_S3_ARCHIVE_STORE.get().cloned().ok_or_else(|| {
+                AmberError::Config("s3 archive is not configured for runtime read path".to_string())
+            })?;
+
+            if store.bucket() != bucket {
+                return Err(AmberError::Config(format!(
+                    "archive_url bucket '{}' does not match configured bucket '{}'",
+                    bucket,
+                    store.bucket()
+                )));
+            }
+
+            store.read_range(&key, start, end).await
+        }
         scheme => Err(AmberError::InvalidRequest(format!(
             "unsupported archive_url scheme: {}",
             scheme
@@ -259,6 +465,29 @@ pub fn parse_redis_archive_url(parsed: &Url) -> Result<(String, String)> {
     }
 
     Ok((redis_url, key))
+}
+
+pub fn parse_s3_archive_url(parsed: &Url) -> Result<(String, String)> {
+    if parsed.scheme() != "s3" {
+        return Err(AmberError::InvalidRequest(format!(
+            "not an s3 archive url: {}",
+            parsed
+        )));
+    }
+
+    let bucket = parsed
+        .host_str()
+        .ok_or_else(|| AmberError::InvalidRequest("s3 archive_url missing bucket".to_string()))?
+        .to_string();
+
+    let key = parsed.path().trim_matches('/').to_string();
+    if key.is_empty() {
+        return Err(AmberError::InvalidRequest(
+            "s3 archive_url missing object key".to_string(),
+        ));
+    }
+
+    Ok((bucket, key))
 }
 
 fn normalize_base_redis_url(url: &str) -> Result<String> {

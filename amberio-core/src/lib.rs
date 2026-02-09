@@ -20,6 +20,7 @@ pub use slot_manager::{
 };
 pub use storage::{
     ArchiveListPage, ArchiveStore, BlobHead, BlobMeta, HeadKind, MetadataStore, PartEntry,
-    PartIndexState, PartStore, PutPartResult, RedisArchiveStore, TombstoneMeta, compute_hash,
-    parse_redis_archive_url, read_archive_range_bytes, verify_hash,
+    PartIndexState, PartStore, PutPartResult, RedisArchiveStore, S3ArchiveStore, TombstoneMeta,
+    compute_hash, parse_redis_archive_url, parse_s3_archive_url, read_archive_range_bytes,
+    set_default_s3_archive_store, verify_hash,
 };

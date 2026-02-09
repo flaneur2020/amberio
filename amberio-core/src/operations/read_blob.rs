@@ -3,7 +3,7 @@ use crate::{
     PartStore, Result, SlotManager, compute_hash,
 };
 use bytes::Bytes;
-use reqwest::{Url, header::HeaderMap};
+use reqwest::header::HeaderMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -634,115 +634,5 @@ fn part_byte_range(meta: &BlobMeta, part_no: u32) -> Result<(u64, u64)> {
 }
 
 async fn fetch_archive_range_bytes(archive_url: &str, start: u64, end: u64) -> Result<Bytes> {
-    let parsed = Url::parse(archive_url)
-        .map_err(|error| AmberError::InvalidRequest(format!("invalid archive_url: {}", error)))?;
-
-    match parsed.scheme() {
-        "redis" => fetch_redis_archive_range_bytes(&parsed, start, end).await,
-        "s3" => Err(AmberError::Internal(
-            "archive_url with s3:// is not implemented yet".to_string(),
-        )),
-        scheme => Err(AmberError::InvalidRequest(format!(
-            "unsupported archive_url scheme: {}",
-            scheme
-        ))),
-    }
-}
-
-async fn fetch_redis_archive_range_bytes(parsed: &Url, start: u64, end: u64) -> Result<Bytes> {
-    let (redis_url, key) = parse_redis_archive_url(parsed)?;
-
-    let client = redis::Client::open(redis_url.as_str())
-        .map_err(|error| AmberError::Internal(format!("redis archive init failed: {}", error)))?;
-    let mut conn = client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|error| {
-            AmberError::Internal(format!("redis archive connect failed: {}", error))
-        })?;
-
-    let start_i64 = i64::try_from(start)
-        .map_err(|_| AmberError::Internal(format!("invalid redis range start: {}", start)))?;
-    let end_i64 = i64::try_from(end)
-        .map_err(|_| AmberError::Internal(format!("invalid redis range end: {}", end)))?;
-
-    let payload: Vec<u8> = redis::cmd("GETRANGE")
-        .arg(&key)
-        .arg(start_i64)
-        .arg(end_i64)
-        .query_async(&mut conn)
-        .await
-        .map_err(|error| {
-            AmberError::Internal(format!("redis archive GETRANGE failed: {}", error))
-        })?;
-
-    Ok(Bytes::from(payload))
-}
-
-fn parse_redis_archive_url(parsed: &Url) -> Result<(String, String)> {
-    if parsed.scheme() != "redis" {
-        return Err(AmberError::InvalidRequest(format!(
-            "not a redis archive url: {}",
-            parsed
-        )));
-    }
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| AmberError::InvalidRequest("redis archive_url missing host".to_string()))?;
-    let port = parsed.port().unwrap_or(6379);
-
-    let raw_segments: Vec<&str> = parsed
-        .path()
-        .trim_matches('/')
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect();
-
-    if raw_segments.is_empty() {
-        return Err(AmberError::InvalidRequest(
-            "redis archive_url missing object key".to_string(),
-        ));
-    }
-
-    let (db_segment, key_segments): (Option<&str>, Vec<&str>) =
-        if raw_segments.len() >= 2 && raw_segments[0].chars().all(|char| char.is_ascii_digit()) {
-            (Some(raw_segments[0]), raw_segments[1..].to_vec())
-        } else {
-            (None, raw_segments)
-        };
-
-    if key_segments.is_empty() {
-        return Err(AmberError::InvalidRequest(
-            "redis archive_url missing object key".to_string(),
-        ));
-    }
-
-    let key = key_segments.join("/");
-
-    let mut redis_url = String::from("redis://");
-    if !parsed.username().is_empty() {
-        redis_url.push_str(parsed.username());
-        if let Some(password) = parsed.password() {
-            redis_url.push(':');
-            redis_url.push_str(password);
-        }
-        redis_url.push('@');
-    }
-
-    redis_url.push_str(host);
-    redis_url.push(':');
-    redis_url.push_str(&port.to_string());
-
-    if let Some(db_segment) = db_segment {
-        redis_url.push('/');
-        redis_url.push_str(db_segment);
-    }
-
-    if let Some(query) = parsed.query() {
-        redis_url.push('?');
-        redis_url.push_str(query);
-    }
-
-    Ok((redis_url, key))
+    crate::read_archive_range_bytes(archive_url, start, end).await
 }
