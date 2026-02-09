@@ -33,6 +33,10 @@ impl EtcdRegistry {
         format!("{}/health/{}/{}", self.prefix, slot_id, node_id)
     }
 
+    fn bootstrap_key(&self) -> String {
+        format!("{}/bootstrap/state", self.prefix)
+    }
+
     /// Watch for slot changes (simplified - just fetches periodically)
     pub async fn watch_slots(&self) -> Result<tokio::sync::mpsc::Receiver<SlotEvent>> {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -42,6 +46,27 @@ impl EtcdRegistry {
         let _ = tx; // Suppress unused warning
 
         Ok(rx)
+    }
+
+    pub async fn get_bootstrap_bytes(&self) -> Result<Option<Vec<u8>>> {
+        let key = self.bootstrap_key();
+        let mut client = self.client.clone();
+        let response = client.get(key, None).await?;
+
+        Ok(response.kvs().first().map(|kv| kv.value().to_vec()))
+    }
+
+    pub async fn create_bootstrap_bytes_if_absent(&self, bytes: &[u8]) -> Result<bool> {
+        use etcd_client::{Compare, CompareOp, Txn, TxnOp};
+
+        let key = self.bootstrap_key();
+        let mut client = self.client.clone();
+        let transaction = Txn::new()
+            .when([Compare::create_revision(key.as_str(), CompareOp::Equal, 0)])
+            .and_then([TxnOp::put(key, bytes.to_vec(), None)]);
+
+        let response = client.txn(transaction).await?;
+        Ok(response.succeeded())
     }
 }
 

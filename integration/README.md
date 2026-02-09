@@ -39,6 +39,11 @@ python3 integration/008_tla_trace_check.py \
   --tlc-jar /path/to/tla2tools.jar
 ```
 
+## Init flow cases
+
+- `009_server_init_only.py`: validates auto-init, explicit `--init`, and first-wins bootstrap persisted in registry.
+- `010_init_scan_redis_mock.py`: validates optional `init_scan` import using Redis-mocked archive object listing.
+
 ## Notes
 
 - Each case auto-generates cluster configs and data directories under a temporary folder.

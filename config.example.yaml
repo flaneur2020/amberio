@@ -1,17 +1,12 @@
 # Example configuration for Amberio.
 # Optimized for small edge clusters with stable topology.
 
-node:
-  node_id: "edge-node-001"
-  group_id: "edge-cluster-001"
-  bind_addr: "0.0.0.0:8080"
-  disks:
-    - path: /data/disk1
-    - path: /data/disk2
+current_node: edge-node-001
 
 # Registry backend: choose one backend and configure it below.
 registry:
-  backend: redis  # options: etcd | redis
+  backend: redis # options: etcd | redis
+  namespace: edge-cluster-001
   # etcd:
   #   endpoints:
   #     - "http://localhost:2379"
@@ -19,12 +14,29 @@ registry:
     url: "redis://localhost:6379"
     pool_size: 10
 
-# Replication and routing settings.
-replication:
-  # Minimum write acknowledgements required before success is returned.
-  min_write_replicas: 3
-  # Fixed slot count for deterministic routing. Keep stable after bootstrap.
-  total_slots: 2048
+initial_cluster:
+  nodes:
+    - node_id: "edge-node-001"
+      bind_addr: "0.0.0.0:8080"
+      advertise_addr: "edge-node-001:8080"
+      disks:
+        - path: /data/disk1
+        - path: /data/disk2
+    - node_id: "edge-node-002"
+      bind_addr: "0.0.0.0:8081"
+      advertise_addr: "edge-node-001:8080"
+      disks:
+        - path: /data/disk3
+        - path: /data/disk4
+    - node_id: "edge-node-003"
+      bind_addr: "0.0.0.0:8082"
+      advertise_addr: "edge-node-001:8080"
+      disks:
+        - path: /data/disk5
+        - path: /data/disk6
+  replication:
+    min_write_replicas: 3
+    total_slots: 2048
 
 # Optional archive/cold tier backend.
 archive:
@@ -35,3 +47,11 @@ archive:
     credentials:
       access_key_id: "YOUR_ACCESS_KEY_ID"
       secret_access_key: "YOUR_SECRET_ACCESS_KEY"
+
+# Optional init-time archive scan import.
+# When enabled, this runs during initialization only.
+# init_scan:
+#   enabled: true
+#   redis_mock:
+#     url: "redis://localhost:6379"
+#     list_key: "amberio:init-scan:list"

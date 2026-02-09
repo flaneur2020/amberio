@@ -64,6 +64,7 @@ dependencies = [
  "chrono",
  "clap",
  "config",
+ "redis",
  "reqwest",
  "serde",
  "serde_json",

@@ -44,11 +44,22 @@ cargo build --release -p amberio-server --bin amberio
 cp config.example.yaml config.yaml
 ```
 
-4. Start the server:
+4. (Optional) run init-only flow, then exit:
+
+```bash
+./target/release/amberio server --config config.yaml --init
+```
+
+5. Start the server:
 
 ```bash
 ./target/release/amberio server --config config.yaml
 ```
+
+Notes:
+- `initial_cluster` and replication bootstrap are persisted in registry on first init (first-wins).
+- A normal `server` start auto-runs init when state is missing.
+- `--init` runs initialization only and exits.
 
 ## External API (Simplified)
 

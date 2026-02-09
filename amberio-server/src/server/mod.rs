@@ -1,4 +1,4 @@
-use crate::config::{Config, RegistryBackend};
+use crate::config::{RegistryBackend, RuntimeConfig};
 use amberio_core::{
     AmberError, Coordinator, DeleteBlobOperation, EtcdRegistry, HealHeadsOperation,
     HealRepairOperation, HealSlotletsOperation, InternalGetHeadOperation, InternalGetPartOperation,
@@ -34,7 +34,7 @@ pub(crate) use types::*;
 pub struct ServerState {
     pub(crate) node: Arc<Node>,
     pub(crate) registry: Arc<dyn Registry>,
-    pub(crate) config: Config,
+    pub(crate) config: RuntimeConfig,
     pub(crate) coordinator: Arc<Coordinator>,
     pub(crate) put_blob_operation: Arc<PutBlobOperation>,
     pub(crate) read_blob_operation: Arc<ReadBlobOperation>,
@@ -50,7 +50,7 @@ pub struct ServerState {
     pub(crate) idempotent_puts: Arc<RwLock<HashMap<String, PutCacheEntry>>>,
 }
 
-pub async fn run_server(config: Config) -> Result<()> {
+pub async fn run_server(config: RuntimeConfig) -> Result<()> {
     let node_cfg = config.node.clone();
 
     let disk_paths: Vec<std::path::PathBuf> = node_cfg
@@ -61,8 +61,8 @@ pub async fn run_server(config: Config) -> Result<()> {
 
     let node = Arc::new(Node::new(
         node_cfg.node_id.clone(),
-        node_cfg.group_id.clone(),
-        node_cfg.bind_addr.clone(),
+        config.registry.namespace_or_default().to_string(),
+        node_cfg.advertise_addr.clone(),
         disk_paths,
     )?);
 
@@ -84,13 +84,16 @@ pub async fn run_server(config: Config) -> Result<()> {
             let etcd_cfg = config.registry.etcd.as_ref().ok_or_else(|| {
                 AmberError::Config("etcd configuration is required for etcd backend".to_string())
             })?;
-            Arc::new(EtcdRegistry::new(&etcd_cfg.endpoints, &node_cfg.group_id).await?)
+            Arc::new(
+                EtcdRegistry::new(&etcd_cfg.endpoints, config.registry.namespace_or_default())
+                    .await?,
+            )
         }
         RegistryBackend::Redis => {
             let redis_cfg = config.registry.redis.as_ref().ok_or_else(|| {
                 AmberError::Config("redis configuration is required for redis backend".to_string())
             })?;
-            Arc::new(RedisRegistry::new(&redis_cfg.url, &node_cfg.group_id).await?)
+            Arc::new(RedisRegistry::new(&redis_cfg.url, config.registry.namespace_or_default()).await?)
         }
     };
 

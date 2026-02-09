@@ -59,12 +59,34 @@ impl RedisRegistry {
         format!("{}:health:{}:*", self.prefix, slot_id)
     }
 
+    fn bootstrap_key(&self) -> String {
+        format!("{}:bootstrap:state", self.prefix)
+    }
+
     /// Get a connection from the pool
     async fn get_conn(&self) -> Result<redis::aio::MultiplexedConnection> {
         self.client
             .get_multiplexed_async_connection()
             .await
             .map_err(|e| AmberError::Internal(format!("Redis connection error: {}", e)))
+    }
+
+    pub async fn get_bootstrap_bytes(&self) -> Result<Option<Vec<u8>>> {
+        let mut conn = self.get_conn().await?;
+        let key = self.bootstrap_key();
+
+        conn.get(&key).await.map_err(|error| {
+            AmberError::Internal(format!("Failed to get bootstrap state from Redis: {}", error))
+        })
+    }
+
+    pub async fn set_bootstrap_bytes_if_absent(&self, bytes: &[u8]) -> Result<bool> {
+        let mut conn = self.get_conn().await?;
+        let key = self.bootstrap_key();
+
+        conn.set_nx(&key, bytes).await.map_err(|error| {
+            AmberError::Internal(format!("Failed to set bootstrap state in Redis: {}", error))
+        })
     }
 }
 

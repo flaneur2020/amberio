@@ -103,6 +103,8 @@ class AmberCluster:
         self._ensure_binary()
         self._prepare_nodes()
         for node in self.nodes:
+            self._run_node_init(node)
+        for node in self.nodes:
             self._start_node(node)
         for node in self.nodes:
             self._wait_node_ready(node)
@@ -229,18 +231,14 @@ class AmberCluster:
     def _prepare_nodes(self) -> None:
         self.nodes.clear()
         for index in range(self.node_count):
-            node_id = f"it-node-{index + 1}"
+            node_id = f"it-{self.run_id}-node-{index + 1}"
             port = self.base_port + index
             node_dir = self.work_dir / f"node-{index + 1}"
             data_dir = node_dir / "disk0"
             config_path = node_dir / "config.yaml"
             log_path = node_dir / "server.log"
 
-            data_dir.mkdir(parents=True, exist_ok=True)
             node_dir.mkdir(parents=True, exist_ok=True)
-
-            config_content = self._render_config(node_id=node_id, port=port, data_dir=data_dir)
-            config_path.write_text(config_content, encoding="utf-8")
 
             self.nodes.append(
                 NodeRuntime(
@@ -253,24 +251,71 @@ class AmberCluster:
                 )
             )
 
-    def _render_config(self, *, node_id: str, port: int, data_dir: Path) -> str:
-        data_dir_value = data_dir.as_posix()
+        for node in self.nodes:
+            config_content = self._render_config(current_node_id=node.node_id)
+            node.config_path.write_text(config_content, encoding="utf-8")
+
+    def _render_config(self, *, current_node_id: str) -> str:
+        cluster_nodes = "".join(
+            (
+                f"    - node_id: \"{node.node_id}\"\n"
+                f"      bind_addr: \"127.0.0.1:{node.port}\"\n"
+                f"      advertise_addr: \"127.0.0.1:{node.port}\"\n"
+                f"      disks:\n"
+                f"        - path: \"{node.data_dir.as_posix()}\"\n"
+            )
+            for node in self.nodes
+        )
+
         return (
-            f"node:\n"
-            f"  node_id: \"{node_id}\"\n"
-            f"  group_id: \"{self.group_id}\"\n"
-            f"  bind_addr: \"127.0.0.1:{port}\"\n"
-            f"  disks:\n"
-            f"    - path: \"{data_dir_value}\"\n"
+            f"current_node: \"{current_node_id}\"\n"
             f"registry:\n"
             f"  backend: redis\n"
+            f"  namespace: \"{self.group_id}\"\n"
             f"  redis:\n"
             f"    url: \"{self.redis_url}\"\n"
             f"    pool_size: 8\n"
-            f"replication:\n"
-            f"  min_write_replicas: {self.min_write_replicas}\n"
-            f"  total_slots: {self.total_slots}\n"
+            f"initial_cluster:\n"
+            f"  nodes:\n"
+            f"{cluster_nodes}"
+            f"  replication:\n"
+            f"    min_write_replicas: {self.min_write_replicas}\n"
+            f"    total_slots: {self.total_slots}\n"
         )
+
+    def _run_node_init(self, node: NodeRuntime) -> None:
+        node.log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        environment = os.environ.copy()
+        environment.setdefault("RUST_LOG", "amberio=info")
+
+        with open(node.log_path, "ab") as log_handle:
+            result = subprocess.run(
+                [
+                    str(self.binary_path),
+                    "server",
+                    "--config",
+                    str(node.config_path),
+                    "--init",
+                ],
+                cwd=REPO_ROOT,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                env=environment,
+                timeout=20,
+            )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Node {node.node_id} init failed with code {result.returncode}. "
+                f"Log tail:\n{tail_file(node.log_path)}"
+            )
+
+        amberio_dir = node.data_dir / "amberio"
+        if not amberio_dir.exists():
+            raise RuntimeError(
+                f"Node {node.node_id} init did not create expected directory: {amberio_dir}"
+            )
 
     def _capture_write_trace_event(
         self,
