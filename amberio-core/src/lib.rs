@@ -14,7 +14,7 @@ pub use node::{Node, NodeInfo, NodeStatus};
 pub use operations::*;
 pub use registry::etcd::EtcdRegistry;
 pub use registry::redis::RedisRegistry;
-pub use registry::{DynRegistry, Registry, SlotEvent};
+pub use registry::{DynRegistry, Registry, RegistryBuilder, SlotEvent};
 pub use slot_manager::{
     PART_SIZE, ReplicaStatus, Slot, SlotHealth, SlotInfo, SlotManager, TOTAL_SLOTS, slot_for_key,
 };

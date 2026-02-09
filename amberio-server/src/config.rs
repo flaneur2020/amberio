@@ -1,4 +1,9 @@
-use amberio_core::{AmberError, Result};
+use amberio_core::{
+    AmberError, InitClusterArchiveConfig, InitClusterArchiveS3Config,
+    InitClusterArchiveS3Credentials, InitClusterBootstrapState, InitClusterDiskConfig,
+    InitClusterNodeConfig, InitClusterOperationRequest, InitClusterReplicationConfig,
+    InitClusterScanConfig, InitClusterScanRedisMockConfig, RegistryBuilder, Result,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -25,14 +30,6 @@ pub struct InitialNodeConfig {
     #[serde(default)]
     pub advertise_addr: Option<String>,
     pub disks: Vec<DiskConfig>,
-}
-
-impl InitialNodeConfig {
-    pub fn effective_address(&self) -> String {
-        self.advertise_addr
-            .clone()
-            .unwrap_or_else(|| self.bind_addr.clone())
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,31 +142,7 @@ pub struct InitScanRedisMockConfig {
     pub list_key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InitScanEntry {
-    pub path: String,
-    pub size_bytes: u64,
-    pub etag: String,
-    pub archive_url: String,
-    #[serde(default = "default_part_size")]
-    pub part_size: u64,
-    #[serde(default)]
-    pub updated_at: Option<String>,
-}
-
-fn default_part_size() -> u64 {
-    64 * 1024 * 1024
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BootstrapState {
-    pub initialized_at: String,
-    pub current_node: String,
-    pub nodes: Vec<InitialNodeConfig>,
-    pub replication: ReplicationConfig,
-    pub archive: Option<ArchiveConfig>,
-    pub initialized_by: String,
-}
+pub type BootstrapState = InitClusterBootstrapState;
 
 impl Config {
     pub fn from_file(path: &str) -> Result<Self> {
@@ -186,6 +159,84 @@ impl Config {
         Ok(config)
     }
 
+    pub fn to_init_cluster_request(&self) -> InitClusterOperationRequest {
+        InitClusterOperationRequest {
+            current_node: self.current_node.clone(),
+            nodes: self
+                .initial_cluster
+                .nodes
+                .iter()
+                .map(|node| InitClusterNodeConfig {
+                    node_id: node.node_id.clone(),
+                    bind_addr: node.bind_addr.clone(),
+                    advertise_addr: node.advertise_addr.clone(),
+                    disks: node
+                        .disks
+                        .iter()
+                        .map(|disk| InitClusterDiskConfig {
+                            path: disk.path.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            replication: InitClusterReplicationConfig {
+                min_write_replicas: self.initial_cluster.replication.min_write_replicas,
+                total_slots: self.initial_cluster.replication.total_slots,
+            },
+            archive: self
+                .archive
+                .as_ref()
+                .map(|archive| InitClusterArchiveConfig {
+                    archive_type: archive.archive_type.clone(),
+                    s3: archive.s3.as_ref().map(|s3| InitClusterArchiveS3Config {
+                        bucket: s3.bucket.clone(),
+                        region: s3.region.clone(),
+                        credentials: InitClusterArchiveS3Credentials {
+                            access_key_id: s3.credentials.access_key_id.clone(),
+                            secret_access_key: s3.credentials.secret_access_key.clone(),
+                        },
+                    }),
+                }),
+            init_scan: self.init_scan.as_ref().map(|scan| InitClusterScanConfig {
+                enabled: scan.enabled,
+                redis_mock: scan
+                    .redis_mock
+                    .as_ref()
+                    .map(|mock| InitClusterScanRedisMockConfig {
+                        url: mock.url.clone(),
+                        list_key: mock.list_key.clone(),
+                    }),
+            }),
+        }
+    }
+
+    pub fn registry_builder(&self) -> RegistryBuilder {
+        let builder = RegistryBuilder::new().namespace(self.registry.namespace_or_default());
+
+        match self.registry.backend {
+            RegistryBackend::Etcd => {
+                let endpoints = self
+                    .registry
+                    .etcd
+                    .as_ref()
+                    .map(|cfg| cfg.endpoints.clone())
+                    .unwrap_or_default();
+
+                builder.backend("etcd").etcd_endpoints(endpoints)
+            }
+            RegistryBackend::Redis => {
+                let url = self
+                    .registry
+                    .redis
+                    .as_ref()
+                    .map(|cfg| cfg.url.clone())
+                    .unwrap_or_default();
+
+                builder.backend("redis").redis_url(url)
+            }
+        }
+    }
+
     pub fn runtime_from_bootstrap(&self, bootstrap: &BootstrapState) -> Result<RuntimeConfig> {
         let current_node = bootstrap
             .nodes
@@ -196,30 +247,37 @@ impl Config {
                     "current_node '{}' not found in bootstrap nodes",
                     self.current_node
                 ))
-            })?
-            .clone();
+            })?;
 
         Ok(RuntimeConfig {
             node: RuntimeNodeConfig {
                 node_id: current_node.node_id.clone(),
                 bind_addr: current_node.bind_addr.clone(),
                 advertise_addr: current_node.effective_address(),
-                disks: current_node.disks,
+                disks: current_node
+                    .disks
+                    .iter()
+                    .map(|disk| DiskConfig {
+                        path: disk.path.clone(),
+                    })
+                    .collect(),
             },
-            replication: bootstrap.replication.clone(),
+            replication: ReplicationConfig {
+                min_write_replicas: bootstrap.replication.min_write_replicas,
+                total_slots: bootstrap.replication.total_slots,
+            },
             registry: self.registry.clone(),
-            archive: bootstrap.archive.clone(),
+            archive: bootstrap.archive.as_ref().map(|archive| ArchiveConfig {
+                archive_type: archive.archive_type.clone(),
+                s3: archive.s3.as_ref().map(|s3| S3Config {
+                    bucket: s3.bucket.clone(),
+                    region: s3.region.clone(),
+                    credentials: S3Credentials {
+                        access_key_id: s3.credentials.access_key_id.clone(),
+                        secret_access_key: s3.credentials.secret_access_key.clone(),
+                    },
+                }),
+            }),
         })
-    }
-
-    pub fn local_bootstrap_state(&self) -> BootstrapState {
-        BootstrapState {
-            initialized_at: chrono::Utc::now().to_rfc3339(),
-            current_node: self.current_node.clone(),
-            nodes: self.initial_cluster.nodes.clone(),
-            replication: self.initial_cluster.replication.clone(),
-            archive: self.archive.clone(),
-            initialized_by: self.current_node.clone(),
-        }
     }
 }

@@ -76,7 +76,10 @@ impl RedisRegistry {
         let key = self.bootstrap_key();
 
         conn.get(&key).await.map_err(|error| {
-            AmberError::Internal(format!("Failed to get bootstrap state from Redis: {}", error))
+            AmberError::Internal(format!(
+                "Failed to get bootstrap state from Redis: {}",
+                error
+            ))
         })
     }
 
@@ -236,5 +239,13 @@ impl Registry for RedisRegistry {
         }
 
         Ok(nodes)
+    }
+
+    async fn get_bootstrap_state(&self) -> Result<Option<Vec<u8>>> {
+        self.get_bootstrap_bytes().await
+    }
+
+    async fn set_bootstrap_state_if_absent(&self, payload: &[u8]) -> Result<bool> {
+        self.set_bootstrap_bytes_if_absent(payload).await
     }
 }

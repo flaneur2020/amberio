@@ -2,6 +2,7 @@ pub mod delete_blob;
 pub mod heal_heads;
 pub mod heal_repair;
 pub mod heal_slotlets;
+pub mod init_cluster;
 pub mod internal_get_head;
 pub mod internal_get_part;
 pub mod internal_put_head;
@@ -21,6 +22,12 @@ pub use heal_repair::{HealRepairOperation, HealRepairOperationRequest, HealRepai
 pub use heal_slotlets::{
     HealSlotletItem, HealSlotletsOperation, HealSlotletsOperationRequest,
     HealSlotletsOperationResult,
+};
+pub use init_cluster::{
+    InitClusterArchiveConfig, InitClusterArchiveS3Config, InitClusterArchiveS3Credentials,
+    InitClusterBootstrapState, InitClusterDiskConfig, InitClusterNodeConfig, InitClusterOperation,
+    InitClusterOperationRequest, InitClusterOperationResult, InitClusterReplicationConfig,
+    InitClusterScanConfig, InitClusterScanRedisMockConfig,
 };
 pub use internal_get_head::{
     InternalGetHeadOperation, InternalGetHeadOperationOutcome, InternalGetHeadOperationRequest,

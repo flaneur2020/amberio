@@ -196,4 +196,12 @@ impl Registry for EtcdRegistry {
 
         Ok(nodes)
     }
+
+    async fn get_bootstrap_state(&self) -> Result<Option<Vec<u8>>> {
+        self.get_bootstrap_bytes().await
+    }
+
+    async fn set_bootstrap_state_if_absent(&self, payload: &[u8]) -> Result<bool> {
+        self.create_bootstrap_bytes_if_absent(payload).await
+    }
 }

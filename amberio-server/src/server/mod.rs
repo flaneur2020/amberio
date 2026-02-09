@@ -1,9 +1,9 @@
-use crate::config::{RegistryBackend, RuntimeConfig};
+use crate::config::RuntimeConfig;
 use amberio_core::{
-    AmberError, Coordinator, DeleteBlobOperation, EtcdRegistry, HealHeadsOperation,
-    HealRepairOperation, HealSlotletsOperation, InternalGetHeadOperation, InternalGetPartOperation,
+    AmberError, Coordinator, DeleteBlobOperation, HealHeadsOperation, HealRepairOperation,
+    HealSlotletsOperation, InternalGetHeadOperation, InternalGetPartOperation,
     InternalPutHeadOperation, InternalPutPartOperation, ListBlobsOperation, Node, NodeInfo,
-    PartStore, PutBlobOperation, ReadBlobOperation, RedisRegistry, Registry, Result,
+    PartStore, PutBlobOperation, ReadBlobOperation, Registry, Result,
 };
 use axum::{
     Json, Router,
@@ -50,7 +50,7 @@ pub struct ServerState {
     pub(crate) idempotent_puts: Arc<RwLock<HashMap<String, PutCacheEntry>>>,
 }
 
-pub async fn run_server(config: RuntimeConfig) -> Result<()> {
+pub async fn run_server(config: RuntimeConfig, registry: Arc<dyn Registry>) -> Result<()> {
     let node_cfg = config.node.clone();
 
     let disk_paths: Vec<std::path::PathBuf> = node_cfg
@@ -78,24 +78,6 @@ pub async fn run_server(config: RuntimeConfig) -> Result<()> {
     )?);
 
     let part_store = Arc::new(PartStore::new(data_dir)?);
-
-    let registry: Arc<dyn Registry> = match config.registry.backend {
-        RegistryBackend::Etcd => {
-            let etcd_cfg = config.registry.etcd.as_ref().ok_or_else(|| {
-                AmberError::Config("etcd configuration is required for etcd backend".to_string())
-            })?;
-            Arc::new(
-                EtcdRegistry::new(&etcd_cfg.endpoints, config.registry.namespace_or_default())
-                    .await?,
-            )
-        }
-        RegistryBackend::Redis => {
-            let redis_cfg = config.registry.redis.as_ref().ok_or_else(|| {
-                AmberError::Config("redis configuration is required for redis backend".to_string())
-            })?;
-            Arc::new(RedisRegistry::new(&redis_cfg.url, config.registry.namespace_or_default()).await?)
-        }
-    };
 
     let coordinator = Arc::new(Coordinator::new(config.replication.min_write_replicas));
 

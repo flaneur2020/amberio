@@ -4,6 +4,7 @@
 //! (etcd, Redis, etc.)
 
 pub mod etcd;
+pub mod factory;
 pub mod redis;
 
 use crate::error::Result;
@@ -11,6 +12,8 @@ use crate::node::NodeInfo;
 use crate::slot_manager::{SlotHealth, SlotInfo};
 use async_trait::async_trait;
 use std::collections::HashMap;
+
+pub use factory::RegistryBuilder;
 
 /// Trait for registry implementations
 #[async_trait]
@@ -38,6 +41,12 @@ pub trait Registry: Send + Sync {
 
     /// Get all nodes in the group
     async fn get_nodes(&self) -> Result<Vec<NodeInfo>>;
+
+    /// Get persisted cluster bootstrap state bytes
+    async fn get_bootstrap_state(&self) -> Result<Option<Vec<u8>>>;
+
+    /// Persist bootstrap state only if absent (first-wins)
+    async fn set_bootstrap_state_if_absent(&self, payload: &[u8]) -> Result<bool>;
 }
 
 /// Type alias for dynamic registry
