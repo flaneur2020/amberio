@@ -18,8 +18,8 @@ def _build_s3_client(endpoint_url: str, region: str):
         "s3",
         endpoint_url=endpoint_url,
         region_name=region,
-        aws_access_key_id="amberio-it-access",
-        aws_secret_access_key="amberio-it-secret",
+        aws_access_key_id="rimio-it-access",
+        aws_secret_access_key="rimio-it-secret",
         config=BotoConfig(
             s3={"addressing_style": "path"},
             signature_version="s3v4",
@@ -60,9 +60,9 @@ def main() -> None:
         endpoint = cluster.node_url(0)
         client = _build_s3_client(endpoint, args.s3_region)
 
-        bucket = "amberio-it-014"
+        bucket = "rimio-it-014"
         key = "cases/014/get-object-compat.bin"
-        body = b"amberio-s3-get-object-compatibility-014"
+        body = b"rimio-s3-get-object-compatibility-014"
 
         put_result = client.put_object(Bucket=bucket, Key=key, Body=body)
         _assert(

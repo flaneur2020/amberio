@@ -30,70 +30,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
-name = "amberio-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "etcd-client",
- "futures-util",
- "hex",
- "object_store",
- "redis",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-test",
- "tracing",
- "ulid",
-]
-
-[[package]]
-name = "amberio-s3-gateway"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum 0.7.9",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "md-5",
-]
-
-[[package]]
-name = "amberio-server"
-version = "0.1.0"
-dependencies = [
- "amberio-core",
- "amberio-s3-gateway",
- "anyhow",
- "async-trait",
- "axum 0.7.9",
- "bytes",
- "chrono",
- "clap",
- "config",
- "redis",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tower 0.4.13",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
- "ulid",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2060,6 +1996,70 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+]
+
+[[package]]
+name = "rimio-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "etcd-client",
+ "futures-util",
+ "hex",
+ "object_store",
+ "redis",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
+name = "rimio-s3-gateway"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "md-5",
+]
+
+[[package]]
+name = "rimio-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.7.9",
+ "bytes",
+ "chrono",
+ "clap",
+ "config",
+ "redis",
+ "reqwest",
+ "rimio-core",
+ "rimio-s3-gateway",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower 0.4.13",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
 ]
 
 [[package]]

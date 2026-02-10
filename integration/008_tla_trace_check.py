@@ -39,8 +39,8 @@ def main() -> None:
     with cluster_from_args(args) as cluster:
         blob_path = f"cases/008/{uuid.uuid4().hex}.txt"
         encoded = quote_blob_path(blob_path)
-        body_v1 = b"amberio-008-v1\n"
-        body_v2 = b"amberio-008-v2\n"
+        body_v1 = b"rimio-008-v1\n"
+        body_v2 = b"rimio-008-v2\n"
 
         write_id = f"w-{uuid.uuid4()}"
         put_v1 = cluster.external_request(
@@ -50,7 +50,7 @@ def main() -> None:
             body=body_v1,
             headers={
                 "content-type": "application/octet-stream",
-                "x-amberio-write-id": write_id,
+                "x-rimio-write-id": write_id,
             },
         )
         expect_status(put_v1.status, {201}, "PUT v1")
@@ -62,7 +62,7 @@ def main() -> None:
             body=body_v1,
             headers={
                 "content-type": "application/octet-stream",
-                "x-amberio-write-id": write_id,
+                "x-rimio-write-id": write_id,
             },
         )
         expect_status(put_retry.status, {200, 201}, "PUT retry")
@@ -74,7 +74,7 @@ def main() -> None:
             body=body_v2,
             headers={
                 "content-type": "application/octet-stream",
-                "x-amberio-write-id": f"w-{uuid.uuid4()}",
+                "x-rimio-write-id": f"w-{uuid.uuid4()}",
             },
         )
         expect_status(put_v2.status, {201}, "PUT v2")
@@ -83,7 +83,7 @@ def main() -> None:
             2 % cluster.node_count,
             "DELETE",
             f"/blobs/{encoded}",
-            headers={"x-amberio-write-id": f"d-{uuid.uuid4()}"},
+            headers={"x-rimio-write-id": f"d-{uuid.uuid4()}"},
         )
         expect_status(delete_response.status, {200, 204}, "DELETE")
 

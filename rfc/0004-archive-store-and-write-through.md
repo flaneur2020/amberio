@@ -1,4 +1,4 @@
-# Amberio 设计文档（RFC 0004）
+# Rimio 设计文档（RFC 0004）
 
 > 在 RFC 0003 基础上，补齐 archive 的完整实现闭环：统一抽象、写入归档、读取回源、初始化扫描对齐。
 
@@ -41,7 +41,7 @@
 
 ### 决策 1：`ArchiveStore` 接口统一为分页 list/read/write
 
-`ArchiveStore` 位于 `amberio-core/src/storage/`，提供：
+`ArchiveStore` 位于 `rimio-core/src/storage/`，提供：
 
 - `list_blobs_page(list_key, cursor, limit)`：供 `init_scan` 分页扫描；
 - `list_blobs(list_key)`：便捷方法（内部迭代分页）；
@@ -87,7 +87,7 @@ archive:
   archive_type: redis
   redis:
     url: "redis://127.0.0.1:6379"
-    key_prefix: "amberio:archive"
+    key_prefix: "rimio:archive"
 ```
 
 说明：
@@ -102,7 +102,7 @@ init_scan:
   enabled: true
   redis:
     url: "redis://127.0.0.1:6379"
-    list_key: "amberio:init-scan:list"
+    list_key: "rimio:init-scan:list"
     page_size: 500
 ```
 

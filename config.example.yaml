@@ -1,4 +1,4 @@
-# Example configuration for Amberio.
+# Example configuration for Rimio.
 # Optimized for small edge clusters with stable topology.
 
 current_node: node-1
@@ -39,7 +39,7 @@ initial_cluster:
 archive:
   archive_type: s3 # options: s3 | redis
   s3:
-    bucket: "amberio-archive"
+    bucket: "rimio-archive"
     region: "us-east-1"
     # endpoint: "http://127.0.0.1:9000" # for MinIO/S3-compatible
     # allow_http: true # set true for non-TLS local endpoints
@@ -48,7 +48,7 @@ archive:
       secret_access_key: "YOUR_SECRET_ACCESS_KEY"
   # redis:
   #   url: "redis://localhost:6379"
-  #   key_prefix: "amberio:archive"
+  #   key_prefix: "rimio:archive"
 
 # Optional init-time archive scan import.
 # When enabled, this runs during initialization only.
@@ -56,5 +56,5 @@ archive:
 #   enabled: true
 #   redis:
 #     url: "redis://localhost:6379"
-#     list_key: "amberio:init-scan:list"
+#     list_key: "rimio:init-scan:list"
 #     page_size: 500

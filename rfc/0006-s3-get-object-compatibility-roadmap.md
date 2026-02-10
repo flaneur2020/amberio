@@ -1,4 +1,4 @@
-# Amberio 设计文档（RFC 0006）
+# Rimio 设计文档（RFC 0006）
 
 > 聚焦已支持 S3 API 的兼容性收敛路径，优先完善 `GetObject` 参数面与行为语义。
 
@@ -6,8 +6,8 @@
 
 RFC 0005 已完成两件关键事情：
 
-1. 引入 `amberio-s3-gateway` 并在 `amberio-server` 中统一暴露。
-2. 将 Amberio 原生 REST API 迁移到 `/_/api/v1/*`，为 S3 根路径路由留出空间。
+1. 引入 `rimio-s3-gateway` 并在 `rimio-server` 中统一暴露。
+2. 将 Rimio 原生 REST API 迁移到 `/_/api/v1/*`，为 S3 根路径路由留出空间。
 
 当前 S3 能力已经可用，但兼容层仍处于 V1：
 

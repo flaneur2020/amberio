@@ -22,11 +22,11 @@ def ensure_binary(binary_path: Path, *, build_if_missing: bool) -> None:
 
     if not build_if_missing:
         raise RuntimeError(
-            f"Amberio binary not found at {binary_path}. "
+            f"Rimio binary not found at {binary_path}. "
             "Build it first or use --build-if-missing."
         )
 
-    command = ["cargo", "build", "--release", "-p", "amberio-server", "--bin", "amberio"]
+    command = ["cargo", "build", "--release", "-p", "rimio-server", "--bin", "rimio"]
     print(f"[012] building binary: {' '.join(command)}")
     subprocess.run(command, cwd=REPO_ROOT, check=True)
 
@@ -93,28 +93,28 @@ def main() -> None:
     parser.add_argument("--binary", default=str(DEFAULT_BINARY))
     parser.add_argument(
         "--redis-url",
-        default=os.getenv("AMBERIO_REDIS_URL", "redis://127.0.0.1:6379"),
+        default=os.getenv("RIMIO_REDIS_URL", "redis://127.0.0.1:6379"),
     )
     parser.add_argument("--base-port", type=int, default=20240)
     parser.add_argument(
         "--s3-endpoint",
-        default=os.getenv("AMBERIO_S3_ENDPOINT", "http://127.0.0.1:9000"),
+        default=os.getenv("RIMIO_S3_ENDPOINT", "http://127.0.0.1:9000"),
     )
     parser.add_argument(
         "--s3-bucket",
-        default=os.getenv("AMBERIO_S3_BUCKET", "amberio-it"),
+        default=os.getenv("RIMIO_S3_BUCKET", "rimio-it"),
     )
     parser.add_argument(
         "--s3-region",
-        default=os.getenv("AMBERIO_S3_REGION", "us-east-1"),
+        default=os.getenv("RIMIO_S3_REGION", "us-east-1"),
     )
     parser.add_argument(
         "--s3-access-key-id",
-        default=os.getenv("AMBERIO_S3_ACCESS_KEY_ID", "minioadmin"),
+        default=os.getenv("RIMIO_S3_ACCESS_KEY_ID", "minioadmin"),
     )
     parser.add_argument(
         "--s3-secret-access-key",
-        default=os.getenv("AMBERIO_S3_SECRET_ACCESS_KEY", "minioadmin"),
+        default=os.getenv("RIMIO_S3_SECRET_ACCESS_KEY", "minioadmin"),
     )
     parser.add_argument("--keep-artifacts", action="store_true")
     parser.add_argument("--build-if-missing", action="store_true")
@@ -130,7 +130,7 @@ def main() -> None:
     ensure_socket_reachable(endpoint_host, endpoint_port, label="S3 endpoint")
 
     run_id = f"012-{int(time.time())}-{uuid.uuid4().hex[:6]}"
-    work_dir = Path(tempfile.mkdtemp(prefix=f"amberio-{run_id}-"))
+    work_dir = Path(tempfile.mkdtemp(prefix=f"rimio-{run_id}-"))
     config_path = work_dir / "config.yaml"
     log_path = work_dir / "server.log"
     disk_path = work_dir / "disk0"
@@ -142,7 +142,7 @@ def main() -> None:
 
     blob_path = f"cases/012/{uuid.uuid4().hex}.bin"
     encoded_path = quote_blob_path(blob_path)
-    body = (b"amberio-rfc0004-s3-write-through-" * 12000)[:400_000]
+    body = (b"rimio-rfc0004-s3-write-through-" * 12000)[:400_000]
 
     config_path.write_text(
         "\n".join(
@@ -181,7 +181,7 @@ def main() -> None:
     )
 
     env = os.environ.copy()
-    env.setdefault("RUST_LOG", "amberio=info")
+    env.setdefault("RUST_LOG", "rimio=info")
 
     server_process = None
     log_handle = None

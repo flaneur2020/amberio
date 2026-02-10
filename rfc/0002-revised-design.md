@@ -1,4 +1,4 @@
-# Amberio 设计文档（RFC 0002）
+# Rimio 设计文档（RFC 0002）
 
 > 基于文件系统的简化架构（接近 MinIO），并引入预分片 Slot
 
@@ -153,7 +153,7 @@ WHERE archive_url IS NOT NULL;
 `archive_url` 格式建议：
 
 - `s3://<bucket>/<object_path>?range=bytes=<start>-<end>`
-- 示例：`s3://amberio-archive/slot-731/pack-00042?range=bytes=1048576-2097151`
+- 示例：`s3://rimio-archive/slot-731/pack-00042?range=bytes=1048576-2097151`
 
 ### 执行层约束
 
@@ -341,7 +341,7 @@ WHERE archive_url IS NOT NULL;
 
 ## 结论
 
-RFC 0002 将 Amberio 的核心从“chunk/事务驱动”收敛为“对象路径驱动”：
+RFC 0002 将 Rimio 的核心从“chunk/事务驱动”收敛为“对象路径驱动”：
 
 - 路由层保留预分片 slot；
 - 存储层采用 MinIO 风格对象布局；
@@ -363,8 +363,8 @@ RFC 0002 将 Amberio 的核心从“chunk/事务驱动”收敛为“对象路�
   - 控制面请求与响应使用 `application/json`。
 - 认证（建议）：
   - 外部 API：AK/SK 或 Bearer Token（后续 RFC 细化）。
-  - 内部 API：mTLS + `X-Amberio-Node-Id`。
-- 幂等键：`X-Amberio-Write-Id`（PUT/DELETE 建议必传）。
+  - 内部 API：mTLS + `X-Rimio-Node-Id`。
+- 幂等键：`X-Rimio-Write-Id`（PUT/DELETE 建议必传）。
 - 追踪：`X-Request-Id`（可选，服务端透传）。
 
 ### 对外 API（Client-Facing）
@@ -413,7 +413,7 @@ RFC 0002 将 Amberio 的核心从“chunk/事务驱动”收敛为“对象路�
 - `PUT /api/v1/blobs/{blobPath}`
   - 请求头：
     - `Content-Type: application/octet-stream`
-    - `X-Amberio-Write-Id: <uuid>`（幂等）
+    - `X-Rimio-Write-Id: <uuid>`（幂等）
     - 可选 `If-Match` / `If-None-Match`
   - 语义：
     - 无状态写入，写入流程遵循本 RFC 的 quorum 语义。
@@ -447,15 +447,15 @@ RFC 0002 将 Amberio 的核心从“chunk/事务驱动”收敛为“对象路�
   - 成功返回对象二进制流。
   - 返回头建议：
     - `ETag: <etag>`
-    - `X-Amberio-Generation: <generation>`
+    - `X-Rimio-Generation: <generation>`
     - `Content-Length`
   - 错误：`404 Not Found`（不存在）、`410 Gone`（被 tombstone 覆盖）。
 
 - `HEAD /api/v1/blobs/{blobPath}`
-  - 不返回 body，仅返回元信息头：`ETag`、`X-Amberio-Generation`、`Content-Length`。
+  - 不返回 body，仅返回元信息头：`ETag`、`X-Rimio-Generation`、`Content-Length`。
 
 - `DELETE /api/v1/blobs/{blobPath}`
-  - 请求头：`X-Amberio-Write-Id`（建议）。
+  - 请求头：`X-Rimio-Write-Id`（建议）。
   - 语义：写入 `tombstone.<sha256>` 到 quorum。
   - 成功：`200 OK` 或 `204 No Content`。
 
@@ -487,10 +487,10 @@ RFC 0002 将 Amberio 的核心从“chunk/事务驱动”收敛为“对象路�
 
 - `PUT /internal/v1/slots/{slot_id}/blobs/{blobPath}/parts/{sha256}`
   - 请求头：
-    - `X-Amberio-Write-Id`
-    - `X-Amberio-Generation`
-    - `X-Amberio-Part-Offset`
-    - `X-Amberio-Part-Length`
+    - `X-Rimio-Write-Id`
+    - `X-Rimio-Generation`
+    - `X-Rimio-Part-Offset`
+    - `X-Rimio-Part-Length`
   - 请求体：part 原始 bytes。
   - 语义：
     - 若本地已有同 hash part，返回复用。
@@ -608,7 +608,7 @@ integration/
 - 每个 case 都通过 `integration/_harness.py`：
   - 生成唯一 `group_id`。
   - 为每个节点生成配置文件和数据目录。
-  - 启动多节点 `amberio server` 进程。
+  - 启动多节点 `rimio server` 进程。
 - Redis 不由脚本拉起，默认直连：`redis://127.0.0.1:6379`。
 
 ### Case 说明
@@ -618,7 +618,7 @@ integration/
 
 - `002_external_blob_crud.py`
   - 验证 `PUT/GET/HEAD/LIST/DELETE`。
-  - 验证 `X-Amberio-Write-Id` 幂等重试语义。
+  - 验证 `X-Rimio-Write-Id` 幂等重试语义。
 
 - `003_internal_healing.py`
   - 先下线一个节点制造数据滞后。

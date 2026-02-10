@@ -52,22 +52,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-      - name: Build amberio server (release)
-        run: cargo build --release -p amberio-server --bin amberio
+      - name: Build rimio server (release)
+        run: cargo build --release -p rimio-server --bin rimio
 
       - name: Run base integration tests
         env:
-          AMBERIO_REDIS_URL: redis://127.0.0.1:6379
-          AMBERIO_ENABLE_S3_IT: "0"
+          RIMIO_REDIS_URL: redis://127.0.0.1:6379
+          RIMIO_ENABLE_S3_IT: "0"
         run: |
           uv run --project integration integration/run_all.py \
-            --binary target/release/amberio \
+            --binary target/release/rimio \
             --redis-url redis://127.0.0.1:6379
 
       - name: Start MinIO for optional S3 case
-        if: ${{ vars.AMBERIO_ENABLE_S3_IT == '1' }}
+        if: ${{ vars.RIMIO_ENABLE_S3_IT == '1' }}
         run: |
-          docker run -d --name amberio-minio \
+          docker run -d --name rimio-minio \
             -p 9000:9000 \
             -p 9001:9001 \
             -e MINIO_ROOT_USER=minioadmin \
@@ -84,24 +84,24 @@ jobs:
 
           docker run --rm --network host --entrypoint /bin/sh minio/mc -c '
             mc alias set local http://127.0.0.1:9000 minioadmin minioadmin &&
-            mc mb --ignore-existing local/amberio-it
+            mc mb --ignore-existing local/rimio-it
           '
 
       - name: Run optional S3 integration case (012)
-        if: ${{ vars.AMBERIO_ENABLE_S3_IT == '1' }}
+        if: ${{ vars.RIMIO_ENABLE_S3_IT == '1' }}
         env:
-          AMBERIO_REDIS_URL: redis://127.0.0.1:6379
-          AMBERIO_S3_ENDPOINT: http://127.0.0.1:9000
-          AMBERIO_S3_BUCKET: amberio-it
-          AMBERIO_S3_REGION: us-east-1
-          AMBERIO_S3_ACCESS_KEY_ID: minioadmin
-          AMBERIO_S3_SECRET_ACCESS_KEY: minioadmin
+          RIMIO_REDIS_URL: redis://127.0.0.1:6379
+          RIMIO_S3_ENDPOINT: http://127.0.0.1:9000
+          RIMIO_S3_BUCKET: rimio-it
+          RIMIO_S3_REGION: us-east-1
+          RIMIO_S3_ACCESS_KEY_ID: minioadmin
+          RIMIO_S3_SECRET_ACCESS_KEY: minioadmin
         run: |
           uv run --project integration integration/012_archive_write_through_s3_minio.py \
-            --binary target/release/amberio \
+            --binary target/release/rimio \
             --redis-url redis://127.0.0.1:6379 \
             --s3-endpoint http://127.0.0.1:9000 \
-            --s3-bucket amberio-it \
+            --s3-bucket rimio-it \
             --s3-region us-east-1 \
             --s3-access-key-id minioadmin \
             --s3-secret-access-key minioadmin

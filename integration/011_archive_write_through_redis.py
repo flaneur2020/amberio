@@ -111,11 +111,11 @@ def ensure_binary(binary_path: Path, *, build_if_missing: bool) -> None:
 
     if not build_if_missing:
         raise RuntimeError(
-            f"Amberio binary not found at {binary_path}. "
+            f"Rimio binary not found at {binary_path}. "
             "Build it first or use --build-if-missing."
         )
 
-    command = ["cargo", "build", "--release", "-p", "amberio-server", "--bin", "amberio"]
+    command = ["cargo", "build", "--release", "-p", "rimio-server", "--bin", "rimio"]
     print(f"[011] building binary: {' '.join(command)}")
     subprocess.run(command, cwd=REPO_ROOT, check=True)
 
@@ -184,7 +184,7 @@ def main() -> None:
     parser.add_argument("--binary", default=str(DEFAULT_BINARY))
     parser.add_argument(
         "--redis-url",
-        default=os.getenv("AMBERIO_REDIS_URL", "redis://127.0.0.1:6379"),
+        default=os.getenv("RIMIO_REDIS_URL", "redis://127.0.0.1:6379"),
     )
     parser.add_argument("--base-port", type=int, default=20210)
     parser.add_argument("--keep-artifacts", action="store_true")
@@ -196,7 +196,7 @@ def main() -> None:
     ensure_binary(binary, build_if_missing=args.build_if_missing)
 
     run_id = f"011-{int(time.time())}-{uuid.uuid4().hex[:6]}"
-    work_dir = Path(tempfile.mkdtemp(prefix=f"amberio-{run_id}-"))
+    work_dir = Path(tempfile.mkdtemp(prefix=f"rimio-{run_id}-"))
     config_path = work_dir / "config.yaml"
     log_path = work_dir / "server.log"
     disk_path = work_dir / "disk0"
@@ -208,8 +208,8 @@ def main() -> None:
 
     blob_path = f"cases/011/{uuid.uuid4().hex}.bin"
     encoded_path = quote_blob_path(blob_path)
-    archive_key_prefix = f"amberio:test011:{uuid.uuid4().hex}"
-    body = (b"amberio-rfc0004-write-through-" * 12000)[:360_000]
+    archive_key_prefix = f"rimio:test011:{uuid.uuid4().hex}"
+    body = (b"rimio-rfc0004-write-through-" * 12000)[:360_000]
 
     config_path.write_text(
         "\n".join(
@@ -243,7 +243,7 @@ def main() -> None:
     )
 
     env = os.environ.copy()
-    env.setdefault("RUST_LOG", "amberio=info")
+    env.setdefault("RUST_LOG", "rimio=info")
 
     server_process = None
     log_handle = None

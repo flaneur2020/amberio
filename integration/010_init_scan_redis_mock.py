@@ -165,11 +165,11 @@ def ensure_binary(binary_path: Path, *, build_if_missing: bool) -> None:
 
     if not build_if_missing:
         raise RuntimeError(
-            f"Amberio binary not found at {binary_path}. "
+            f"Rimio binary not found at {binary_path}. "
             "Build it first or use --build-if-missing."
         )
 
-    command = ["cargo", "build", "--release", "-p", "amberio-server", "--bin", "amberio"]
+    command = ["cargo", "build", "--release", "-p", "rimio-server", "--bin", "rimio"]
     print(f"[010] building binary: {' '.join(command)}")
     subprocess.run(command, cwd=REPO_ROOT, check=True)
 
@@ -181,7 +181,7 @@ def main() -> None:
     parser.add_argument("--binary", default=str(DEFAULT_BINARY))
     parser.add_argument(
         "--redis-url",
-        default=os.getenv("AMBERIO_REDIS_URL", "redis://127.0.0.1:6379"),
+        default=os.getenv("RIMIO_REDIS_URL", "redis://127.0.0.1:6379"),
     )
     parser.add_argument("--base-port", type=int, default=20180)
     parser.add_argument("--keep-artifacts", action="store_true")
@@ -193,7 +193,7 @@ def main() -> None:
     ensure_binary(binary, build_if_missing=args.build_if_missing)
 
     run_id = f"010-{int(time.time())}-{uuid.uuid4().hex[:6]}"
-    work_dir = Path(tempfile.mkdtemp(prefix=f"amberio-{run_id}-"))
+    work_dir = Path(tempfile.mkdtemp(prefix=f"rimio-{run_id}-"))
     config_path = work_dir / "config.yaml"
     log_path = work_dir / "server.log"
     disk_path = work_dir / "disk0"
@@ -204,11 +204,11 @@ def main() -> None:
     port = args.base_port
 
     blob_path = f"cases/010/{uuid.uuid4().hex}.bin"
-    archive_key = f"amberio:init-scan:archive:{uuid.uuid4().hex}"
+    archive_key = f"rimio:init-scan:archive:{uuid.uuid4().hex}"
     archive_url = f"{args.redis_url}/{archive_key}"
-    body = (b"amberio-init-scan-redis-mock-" * 5000)[:180_000]
+    body = (b"rimio-init-scan-redis-mock-" * 5000)[:180_000]
     etag = sha256_hex(body)
-    scan_list_key = f"amberio:init-scan:list:{uuid.uuid4().hex}"
+    scan_list_key = f"rimio:init-scan:list:{uuid.uuid4().hex}"
 
     redis_set_binary(args.redis_url, archive_key, body)
     redis_rpush_json(
@@ -258,7 +258,7 @@ def main() -> None:
     )
 
     env = os.environ.copy()
-    env.setdefault("RUST_LOG", "amberio=info")
+    env.setdefault("RUST_LOG", "rimio=info")
 
     server_process = None
     log_handle = None

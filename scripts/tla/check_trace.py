@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Convert an Amberio integration trace JSON into a TLC model run.
+"""Convert an Rimio integration trace JSON into a TLC model run.
 
 This script:
 1) reads a trace JSON array,
-2) materializes a generated `.cfg` for `tla/AmberioTraceReplay.tla`,
+2) materializes a generated `.cfg` for `tla/RimioTraceReplay.tla`,
 3) runs TLC and exits non-zero on spec violation.
 """
 
@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Set
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TRACE_SPEC = REPO_ROOT / "tla" / "AmberioTraceReplay.tla"
+TRACE_SPEC = REPO_ROOT / "tla" / "RimioTraceReplay.tla"
 
 IDENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -200,7 +200,7 @@ def _run_tlc(jar: Path, cfg: Path, workers: int) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Check an Amberio trace with TLA+/TLC")
+    parser = argparse.ArgumentParser(description="Check an Rimio trace with TLA+/TLC")
     parser.add_argument("--trace", required=True, help="Path to JSON trace file")
     parser.add_argument(
         "--tlc-jar",
@@ -271,7 +271,7 @@ def main() -> None:
 
     exit_code = _run_tlc(jar=tlc_jar, cfg=cfg_path, workers=args.workers)
     if exit_code == 0:
-        print("[tla] trace accepted by AmberioTraceReplay")
+        print("[tla] trace accepted by RimioTraceReplay")
     else:
         print("[tla] trace rejected (see TLC output above)")
 

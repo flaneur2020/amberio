@@ -1,11 +1,11 @@
-# Amberio Integration Tests
+# Rimio Integration Tests
 
-These tests are contract tests for Amberio external/internal APIs and S3 gateway behavior.
+These tests are contract tests for Rimio external/internal APIs and S3 gateway behavior.
 
 ## Prerequisites
 
 - Redis is running at `redis://127.0.0.1:6379` (default).
-- Amberio binary is available at `target/release/amberio`, or pass `--build-if-missing`.
+- Rimio binary is available at `target/release/rimio`, or pass `--build-if-missing`.
 - Install `uv` (https://docs.astral.sh/uv/).
 
 ## Python dependencies (uv)
@@ -65,7 +65,7 @@ By default, `run_all.py` skips case `012`.
 
 Enable it with either:
 
-- `AMBERIO_ENABLE_S3_IT=1 uv run --project integration integration/run_all.py ...`
+- `RIMIO_ENABLE_S3_IT=1 uv run --project integration integration/run_all.py ...`
 - `uv run --project integration integration/run_all.py --include-s3 ...`
 
 ## Notes

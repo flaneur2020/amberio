@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Integration test harness for Amberio.
+"""Integration test harness for Rimio.
 
 This harness:
 - Generates per-node config files dynamically.
@@ -25,7 +25,7 @@ from urllib import error, parse, request
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "amberio"
+DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "rimio"
 
 
 @dataclass
@@ -59,7 +59,7 @@ class TraceEvent:
     from_cache: bool
 
 
-class AmberCluster:
+class RimCluster:
     def __init__(
         self,
         *,
@@ -87,11 +87,11 @@ class AmberCluster:
         self.trace_events: List[TraceEvent] = []
 
         self.run_id = f"it-{int(time.time())}-{uuid.uuid4().hex[:6]}"
-        self.group_id = f"amberio-{self.run_id}"
-        self.work_dir = Path(tempfile.mkdtemp(prefix=f"amberio-{self.run_id}-"))
+        self.group_id = f"rimio-{self.run_id}"
+        self.work_dir = Path(tempfile.mkdtemp(prefix=f"rimio-{self.run_id}-"))
         self.nodes: List[NodeRuntime] = []
 
-    def __enter__(self) -> "AmberCluster":
+    def __enter__(self) -> "RimCluster":
         self.start()
         return self
 
@@ -212,7 +212,7 @@ class AmberCluster:
             return
         if not self.build_if_missing:
             raise RuntimeError(
-                f"Amberio binary not found at {self.binary_path}. "
+                f"Rimio binary not found at {self.binary_path}. "
                 "Build it first or use --build-if-missing."
             )
 
@@ -221,9 +221,9 @@ class AmberCluster:
             "build",
             "--release",
             "-p",
-            "amberio-server",
+            "rimio-server",
             "--bin",
-            "amberio",
+            "rimio",
         ]
         print(f"[harness] building binary: {' '.join(command)}")
         subprocess.run(command, cwd=REPO_ROOT, check=True)
@@ -287,7 +287,7 @@ class AmberCluster:
         node.log_path.parent.mkdir(parents=True, exist_ok=True)
 
         environment = os.environ.copy()
-        environment.setdefault("RUST_LOG", "amberio=info")
+        environment.setdefault("RUST_LOG", "rimio=info")
 
         with open(node.log_path, "ab") as log_handle:
             result = subprocess.run(
@@ -311,10 +311,10 @@ class AmberCluster:
                 f"Log tail:\n{tail_file(node.log_path)}"
             )
 
-        amberio_dir = node.data_dir / "amberio"
-        if not amberio_dir.exists():
+        rimio_dir = node.data_dir / "rimio"
+        if not rimio_dir.exists():
             raise RuntimeError(
-                f"Node {node.node_id} init did not create expected directory: {amberio_dir}"
+                f"Node {node.node_id} init did not create expected directory: {rimio_dir}"
             )
 
     def _capture_write_trace_event(
@@ -361,7 +361,7 @@ class AmberCluster:
             if not isinstance(etag, str):
                 return
 
-            write_id = _header_get("x-amberio-write-id")
+            write_id = _header_get("x-rimio-write-id")
             if not write_id:
                 write_id = f"auto-put-g{generation}"
 
@@ -385,7 +385,7 @@ class AmberCluster:
             if response.status not in {200, 204}:
                 return
 
-            write_id = _header_get("x-amberio-write-id") or "auto-delete"
+            write_id = _header_get("x-rimio-write-id") or "auto-delete"
 
             generation = self._latest_generation_for_path(blob_path) + 1
             committed = max(self.min_write_replicas, 1)
@@ -415,7 +415,7 @@ class AmberCluster:
         node.log_handle = open(node.log_path, "ab")
 
         environment = os.environ.copy()
-        environment.setdefault("RUST_LOG", "amberio=info")
+        environment.setdefault("RUST_LOG", "rimio=info")
 
         node.process = subprocess.Popen(
             [str(self.binary_path), "server", "--config", str(node.config_path)],
@@ -551,11 +551,11 @@ def build_case_parser(case_id: str, description: str) -> argparse.ArgumentParser
     parser.add_argument(
         "--binary",
         default=str(DEFAULT_BINARY),
-        help="Path to amberio server binary",
+        help="Path to rimio server binary",
     )
     parser.add_argument(
         "--redis-url",
-        default=os.getenv("AMBERIO_REDIS_URL", "redis://127.0.0.1:6379"),
+        default=os.getenv("RIMIO_REDIS_URL", "redis://127.0.0.1:6379"),
         help="Redis URL for cluster registry",
     )
     parser.add_argument(
@@ -584,12 +584,12 @@ def build_case_parser(case_id: str, description: str) -> argparse.ArgumentParser
     )
     parser.add_argument(
         "--api-prefix",
-        default=os.getenv("AMBERIO_API_PREFIX", "/_/api/v1"),
+        default=os.getenv("RIMIO_API_PREFIX", "/_/api/v1"),
         help="External API prefix",
     )
     parser.add_argument(
         "--internal-prefix",
-        default=os.getenv("AMBERIO_INTERNAL_PREFIX", "/internal/v1"),
+        default=os.getenv("RIMIO_INTERNAL_PREFIX", "/internal/v1"),
         help="Internal API prefix",
     )
     parser.add_argument(
@@ -600,13 +600,13 @@ def build_case_parser(case_id: str, description: str) -> argparse.ArgumentParser
     parser.add_argument(
         "--build-if-missing",
         action="store_true",
-        help="Build amberio binary automatically when not found",
+        help="Build rimio binary automatically when not found",
     )
     return parser
 
 
-def cluster_from_args(args: argparse.Namespace) -> AmberCluster:
-    return AmberCluster(
+def cluster_from_args(args: argparse.Namespace) -> RimCluster:
+    return RimCluster(
         node_count=args.nodes,
         redis_url=args.redis_url,
         binary_path=Path(args.binary),

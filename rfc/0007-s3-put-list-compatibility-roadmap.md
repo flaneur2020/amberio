@@ -1,4 +1,4 @@
-# Amberio 设计文档（RFC 0007）
+# Rimio 设计文档（RFC 0007）
 
 > 扩展 S3 兼容层在 `PutObject` 与 `ListObjectsV2` 上的“字段面 + 行为语义”契约，并保持 staged（分阶段）落地策略。
 

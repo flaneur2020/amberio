@@ -1,6 +1,6 @@
-# Amberio
+# Rimio
 
-Amberio is a lightweight write-back cache layer for small on-premise clusters.
+Rimio is a lightweight write-back cache layer for object storage designed for small on-premises or edge clusters.
 
 It features:
 
@@ -26,7 +26,7 @@ Prerequisites:
 1) Build:
 
 ```bash
-cargo build --release -p amberio-server --bin amberio
+cargo build --release -p rimio-server --bin rimio
 ```
 
 2) Prepare config + local disks:
@@ -39,15 +39,15 @@ mkdir -p demo/node1/disk demo/node2/disk demo/node3/disk
 3) Initialize cluster state once (first wins):
 
 ```bash
-./target/release/amberio server --config config.yaml --current-node node-1 --init
+./target/release/rimio server --config config.yaml --current-node node-1 --init
 ```
 
 4) Start all nodes from the same config (using CLI override):
 
 ```bash
-./target/release/amberio server --config config.yaml --current-node node-1
-./target/release/amberio server --config config.yaml --current-node node-2
-./target/release/amberio server --config config.yaml --current-node node-3
+./target/release/rimio server --config config.yaml --current-node node-1
+./target/release/rimio server --config config.yaml --current-node node-2
+./target/release/rimio server --config config.yaml --current-node node-3
 ```
 
 5) Verify:
@@ -61,7 +61,7 @@ curl http://127.0.0.1:19080/_/api/v1/nodes
 
 ```bash
 uv run --project integration integration/run_all.py \
-  --binary target/release/amberio \
+  --binary target/release/rimio \
   --redis-url redis://127.0.0.1:6379
 ```
 

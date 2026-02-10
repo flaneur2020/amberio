@@ -33,7 +33,7 @@ def _truthy(value: str | None) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Amberio integration cases")
+    parser = argparse.ArgumentParser(description="Run Rimio integration cases")
     parser.add_argument(
         "--case-prefix",
         default="",
@@ -56,7 +56,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    include_s3 = args.include_s3 or _truthy(os.getenv("AMBERIO_ENABLE_S3_IT"))
+    include_s3 = args.include_s3 or _truthy(os.getenv("RIMIO_ENABLE_S3_IT"))
     cases = discover_cases(include_s3=include_s3)
     if args.case_prefix:
         cases = [case for case in cases if case.name.startswith(args.case_prefix)]

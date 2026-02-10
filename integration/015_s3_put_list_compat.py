@@ -20,8 +20,8 @@ def _build_s3_client(endpoint_url: str, region: str):
         "s3",
         endpoint_url=endpoint_url,
         region_name=region,
-        aws_access_key_id="amberio-it-access",
-        aws_secret_access_key="amberio-it-secret",
+        aws_access_key_id="rimio-it-access",
+        aws_secret_access_key="rimio-it-secret",
         config=BotoConfig(
             s3={"addressing_style": "path"},
             signature_version="s3v4",
@@ -96,7 +96,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--s3-bucket-prefix",
-        default="amberio-it-015",
+        default="rimio-it-015",
         help="bucket prefix for this case",
     )
     args = parser.parse_args()
@@ -109,7 +109,7 @@ def main() -> None:
         shared_prefix = f"cases/015/{uuid.uuid4().hex}/"
 
         md5_key = f"{shared_prefix}put-md5-ok.txt"
-        md5_body = b"amberio-s3-put-md5-015"
+        md5_body = b"rimio-s3-put-md5-015"
         md5_base64 = base64.b64encode(hashlib.md5(md5_body).digest()).decode("ascii")
 
         put_ok = client.put_object(
@@ -133,7 +133,7 @@ def main() -> None:
         bad_digest_response = http_request(
             "PUT",
             f"{endpoint}/{bucket}/{quote(bad_digest_key, safe='/')}",
-            body=b"amberio-s3-put-md5-bad-015",
+            body=b"rimio-s3-put-md5-bad-015",
             headers={"Content-MD5": "AAAAAAAAAAAAAAAAAAAAAA=="},
         )
         _assert(
@@ -213,7 +213,7 @@ def main() -> None:
         sse_response = http_request(
             "PUT",
             f"{endpoint}/{bucket}/{quote(sse_key, safe='/')}",
-            body=b"amberio-s3-sse-c-015",
+            body=b"rimio-s3-sse-c-015",
             headers={
                 "x-amz-server-side-encryption-customer-algorithm": "AES256",
                 "x-amz-server-side-encryption-customer-key": "ZmFrZS1rZXk=",
@@ -233,7 +233,7 @@ def main() -> None:
         acl_response = http_request(
             "PUT",
             f"{endpoint}/{bucket}/{quote(acl_key, safe='/')}",
-            body=b"amberio-s3-acl-015",
+            body=b"rimio-s3-acl-015",
             headers={"x-amz-acl": "public-read"},
         )
         _assert(

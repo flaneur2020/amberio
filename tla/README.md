@@ -1,20 +1,20 @@
-# Amberio TLA+ Specs
+# Rimio TLA+ Specs
 
 This folder contains TLA+ specs aligned with the **current implementation**.
 
 ## Files
 
-- `AmberioWriteSemantics.tla`
+- `RimioWriteSemantics.tla`
   - Models external `PUT`/idempotent `PUT retry`/`DELETE` behavior.
   - Captures generation monotonicity per path.
   - Captures write idempotency cache semantics.
   - Includes invariants for monotonic generations and cache consistency.
 
-- `AmberioReplicaSelection.tla`
+- `RimioReplicaSelection.tla`
   - Models slot replica selection in `resolve_replica_nodes`.
   - Rotation by `slot_id % node_count`, then `take(min(3, node_count))`.
 
-- `AmberioTraceReplay.tla`
+- `RimioTraceReplay.tla`
   - Deterministic replay checker for **observed integration traces**.
   - Intended to be fed by `scripts/tla/check_trace.py`.
 
@@ -24,8 +24,8 @@ This folder contains TLA+ specs aligned with the **current implementation**.
 ## Running TLC (exploration)
 
 ```bash
-java -cp /path/to/tla2tools.jar tlc2.TLC -config tla/AmberioWriteSemantics.cfg tla/AmberioWriteSemantics.tla
-java -cp /path/to/tla2tools.jar tlc2.TLC -config tla/AmberioReplicaSelection.cfg tla/AmberioReplicaSelection.tla
+java -cp /path/to/tla2tools.jar tlc2.TLC -config tla/RimioWriteSemantics.cfg tla/RimioWriteSemantics.tla
+java -cp /path/to/tla2tools.jar tlc2.TLC -config tla/RimioReplicaSelection.cfg tla/RimioReplicaSelection.tla
 ```
 
 ## Trace-based checking from integration

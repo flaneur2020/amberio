@@ -40,7 +40,7 @@ def ensure_binary(binary_path: Path, *, build_if_missing: bool) -> None:
 
     if not build_if_missing:
         raise RuntimeError(
-            f"Amberio binary not found at {binary_path}. "
+            f"Rimio binary not found at {binary_path}. "
             "Build it first or use --build-if-missing."
         )
 
@@ -49,9 +49,9 @@ def ensure_binary(binary_path: Path, *, build_if_missing: bool) -> None:
         "build",
         "--release",
         "-p",
-        "amberio-server",
+        "rimio-server",
         "--bin",
-        "amberio",
+        "rimio",
     ]
     print(f"[009] building binary: {' '.join(command)}")
     subprocess.run(command, cwd=REPO_ROOT, check=True)
@@ -149,11 +149,11 @@ def main() -> None:
     parser.add_argument(
         "--binary",
         default=str(DEFAULT_BINARY),
-        help="Path to amberio server binary",
+        help="Path to rimio server binary",
     )
     parser.add_argument(
         "--redis-url",
-        default=os.getenv("AMBERIO_REDIS_URL", "redis://127.0.0.1:6379"),
+        default=os.getenv("RIMIO_REDIS_URL", "redis://127.0.0.1:6379"),
         help="Redis URL for cluster registry",
     )
     parser.add_argument(
@@ -170,7 +170,7 @@ def main() -> None:
     parser.add_argument(
         "--build-if-missing",
         action="store_true",
-        help="Build amberio binary automatically when not found",
+        help="Build rimio binary automatically when not found",
     )
     args = parser.parse_args()
 
@@ -179,7 +179,7 @@ def main() -> None:
     ensure_binary(binary, build_if_missing=args.build_if_missing)
 
     run_id = f"009-{int(time.time())}-{uuid.uuid4().hex[:6]}"
-    work_dir = Path(tempfile.mkdtemp(prefix=f"amberio-{run_id}-"))
+    work_dir = Path(tempfile.mkdtemp(prefix=f"rimio-{run_id}-"))
     config_path = work_dir / "config.yaml"
     node1_port = args.base_port
     node2_port = args.base_port + 1
@@ -235,7 +235,7 @@ def main() -> None:
     )
 
     environment = os.environ.copy()
-    environment.setdefault("RUST_LOG", "amberio=info")
+    environment.setdefault("RUST_LOG", "rimio=info")
 
     try:
         # 1) Auto-init on normal startup when node is not initialized yet.
@@ -245,9 +245,9 @@ def main() -> None:
         finally:
             stop_server(node1_server)
 
-        node1_amberio_dir = node1_disk / "amberio"
-        if not node1_amberio_dir.exists():
-            raise AssertionError(f"auto-init did not create expected directory: {node1_amberio_dir}")
+        node1_rimio_dir = node1_disk / "rimio"
+        if not node1_rimio_dir.exists():
+            raise AssertionError(f"auto-init did not create expected directory: {node1_rimio_dir}")
 
         # 2) Explicit --init should still work and exit quickly.
         with open(node2_log, "ab") as log_handle:

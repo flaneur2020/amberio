@@ -1,4 +1,4 @@
-BINARY ?= target/release/amberio
+BINARY ?= target/release/rimio
 REDIS_URL ?= redis://127.0.0.1:6379
 NODES ?= 3
 MIN_WRITE_REPLICAS ?= 2

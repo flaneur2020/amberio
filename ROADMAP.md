@@ -1,8 +1,8 @@
-# Amberio Roadmap
+# Rimio Roadmap
 
 ## Positioning & Goals
 
-Amberio is positioned as a practical object storage system for small edge
+Rimio is positioned as a practical object storage system for small edge
 clusters with fixed or slowly changing topology.
 
 Near-term goals:

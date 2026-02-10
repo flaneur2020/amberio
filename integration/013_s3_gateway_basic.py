@@ -17,8 +17,8 @@ def _build_s3_client(endpoint_url: str, region: str):
         "s3",
         endpoint_url=endpoint_url,
         region_name=region,
-        aws_access_key_id="amberio-it-access",
-        aws_secret_access_key="amberio-it-secret",
+        aws_access_key_id="rimio-it-access",
+        aws_secret_access_key="rimio-it-secret",
         config=BotoConfig(
             s3={"addressing_style": "path"},
             signature_version="s3v4",
@@ -40,7 +40,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--s3-bucket-prefix",
-        default="amberio-it-013",
+        default="rimio-it-013",
         help="bucket prefix for this case",
     )
     args = parser.parse_args()
@@ -55,7 +55,7 @@ def main() -> None:
         expected_objects: dict[str, bytes] = {}
         for index in range(5):
             key = f"{prefix}obj-{index}.bin"
-            value = f"amberio-s3-case-013-{index}".encode("utf-8")
+            value = f"rimio-s3-case-013-{index}".encode("utf-8")
             expected_objects[key] = value
 
             put_result = client.put_object(Bucket=bucket, Key=key, Body=value)
