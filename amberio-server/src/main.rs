@@ -24,6 +24,10 @@ enum Commands {
         #[arg(short, long, default_value = "config.yaml")]
         config: String,
 
+        /// Override current_node from config at runtime
+        #[arg(long)]
+        current_node: Option<String>,
+
         /// Run initialization flow only, then exit
         #[arg(long)]
         init: bool,
@@ -43,16 +47,29 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Server { config, init } => {
+        Commands::Server {
+            config,
+            current_node,
+            init,
+        } => {
             tracing::info!("Starting Amberio server with config: {}", config);
 
-            let cfg = match Config::from_file(&config) {
+            let mut cfg = match Config::from_file(&config) {
                 Ok(c) => c,
                 Err(error) => {
                     tracing::error!("Failed to load config: {}", error);
                     std::process::exit(1);
                 }
             };
+
+            if let Some(override_node) = current_node {
+                tracing::info!(
+                    "Overriding current_node from '{}' to '{}' via CLI",
+                    cfg.current_node,
+                    override_node
+                );
+                cfg.current_node = override_node;
+            }
 
             let registry_builder = cfg.registry_builder();
 

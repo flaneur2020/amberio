@@ -1,88 +1,63 @@
 # Amberio
 
-Amberio is a lightweight write-through cache for cloud object storage services, designed as a practical storage layer for small on-premise clusters in edge environments where cluster size is limited, topology is relatively stable, and operational simplicity matters more than hyperscale features.
+Amberio is a lightweight write-back cache layer for small on-premise clusters.
 
-Amberio features:
+It features:
 
-- Stay focused on small-to-medium edge deployments instead of internet-scale multi-tenant object storage
-- Provide predictable object routing through pre-sharded `slot`s (fixed 2048 slots)
-- Minio-style Quorum based writes
-- Use local, easy-to-operate metadata (`SQLite`) and filesystem-backed data
-- Expose clear internal repair/sync APIs for resilience and recovery
-- TLA+ proof of correctness
-- S3 Compatibility (in development)
+- Works with S3-based systems (SlateDB, Greptime, Databend, etc.) for on-prem and edge deployments.
+- Simple setup and configuration.
+- Minimal architecture with low operational overhead.
+- TLA+ backed design with extensive property-based testing.
 
-## TLA+
+Non-goals (important):
 
-Amberio includes TLA+ specs and a trace-based checking workflow:
+- No full AWS S3 API compatibility (basic CRUD only).
+- No full AWS IAM/ACL support.
+- No multi-tenant support.
+- Not built for dynamic cluster autoscaling or rebalancing (node addition and removal are not supported).
 
-- Specs are under `tla/`
-- Trace checker script is `scripts/tla/check_trace.py`
-- Integration case `integration/008_tla_trace_check.py` can emit real runtime
-  traces and optionally verify them with TLC
+## Quick guide: bootstrap a local cluster
 
-Quick example:
+Prerequisites:
 
-```bash
-python3 integration/008_tla_trace_check.py \
-  --build-if-missing \
-  --tlc-jar /path/to/tla2tools.jar
-```
+- Redis reachable at `redis://127.0.0.1:6379` (will remove redis dependency soon)
+- Rust toolchain installed
 
-## Quick Start
-
-1. Start Redis (for example, `redis://127.0.0.1:6379`)
-2. Build the binary:
+1) Build:
 
 ```bash
 cargo build --release -p amberio-server --bin amberio
 ```
 
-3. Prepare config:
+2) Prepare config + local disks:
 
 ```bash
 cp config.example.yaml config.yaml
+mkdir -p demo/node1/disk demo/node2/disk demo/node3/disk
 ```
 
-4. (Optional) run init-only flow, then exit:
+3) Initialize cluster state once (first wins):
 
 ```bash
-./target/release/amberio server --config config.yaml --init
+./target/release/amberio server --config config.yaml --current-node node-1 --init
 ```
 
-5. Start the server:
+4) Start all nodes from the same config (using CLI override):
 
 ```bash
-./target/release/amberio server --config config.yaml
+./target/release/amberio server --config config.yaml --current-node node-1
+./target/release/amberio server --config config.yaml --current-node node-2
+./target/release/amberio server --config config.yaml --current-node node-3
 ```
 
-Notes:
-- `initial_cluster` and replication bootstrap are persisted in registry on first init (first-wins).
-- A normal `server` start auto-runs init when state is missing.
-- `--init` runs initialization only and exits.
+5) Verify:
 
-## External API (Amberio-native)
+```bash
+curl http://127.0.0.1:19080/_/api/v1/healthz
+curl http://127.0.0.1:19080/_/api/v1/nodes
+```
 
-- `GET /_/api/v1/healthz`
-- `GET /_/api/v1/nodes`
-- `GET /_/api/v1/slots/resolve?path=<blob_path>`
-- `PUT /_/api/v1/blobs/{path}`
-- `GET /_/api/v1/blobs/{path}`
-- `HEAD /_/api/v1/blobs/{path}`
-- `DELETE /_/api/v1/blobs/{path}`
-- `GET /_/api/v1/blobs?prefix=<p>&limit=<n>`
-
-Common request/response headers:
-- `x-amberio-write-id`
-- `x-amberio-generation`
-
-## S3-compatible API (V1)
-
-- Endpoint style: path-style S3 routes at server root
-- Covered ops: `PutObject`, `GetObject`, `HeadObject`, `DeleteObject`, `ListObjectsV2`
-- Multipart upload APIs currently return `NotImplemented`
-
-## Integration Tests
+## Integration check
 
 ```bash
 uv run --project integration integration/run_all.py \
