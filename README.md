@@ -2,6 +2,20 @@
 
 Rimio is a lightweight write-back cache layer for object storage designed for small on-premises or edge clusters.
 
+```
++-------------------------------------------------------+       +------------------------+
+|  ON-PREMISES / EDGE LOCATION                          |       |  PUBLIC CLOUD          |
+|                                                       |       |                        |
+|   +-------------+         +-----------------------+   |       |   +----------------+   |
+|   |             |  S3 API |                       |   | HTTPS |   |                |   |
+|   | Application | <-----> |     Rimio Cluster     | <-------->|   | Cloud Store    |   |
+|   |    (App)    |         |   (Write-Back Cache)  |   |       |   | (e.g., AWS S3) |   |
+|   |             |         |                       |   |       |   |                |   |
+|   +-------------+         +-----------------------+   |       |   +----------------+   |
+|                                                       |       |                        |
++-------------------------------------------------------+       +------------------------+
+```
+
 It features:
 
 - Works with S3-based systems (SlateDB, Greptime, Databend, WarpStream, Thanos, etc.) for on-prem and edge deployments.
