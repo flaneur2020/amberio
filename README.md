@@ -4,7 +4,7 @@ Rimio is a lightweight write-back cache layer for object storage designed for sm
 
 It features:
 
-- Works with S3-based systems (SlateDB, Greptime, Databend, etc.) for on-prem and edge deployments.
+- Works with S3-based systems (SlateDB, Greptime, Databend, WarpStream, Thanos, etc.) for on-prem and edge deployments.
 - Simple setup and configuration.
 - Minimal architecture with low operational overhead.
 - TLA+ backed design with extensive property-based testing.
