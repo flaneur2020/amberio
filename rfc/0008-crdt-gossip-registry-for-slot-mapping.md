@@ -33,7 +33,6 @@ Redis Cluster 的核心启发是：
 5. **复用成熟实现**：membership、failure detection、gossip 传播优先采用 `memberlist`，避免自研网络协议。
 6. **直接切换落地**：采用一次性切换到 gossip registry，不引入双写/双读迁移阶段。
 7. **统一引导流程**：通过 `start/join` 子命令显式区分“建群”和“入群”，并约束节点命名唯一性。
-8. **受控恢复写入**：支持 `archive.init_cluster` 写入闸门，在归档回补完成前拒绝写请求。
 
 ## 非目标
 
@@ -125,19 +124,6 @@ SlotRecord {
 - 首次成功提案后通过 gossip 广播
 - 新节点 join 后若本地缺失则主动拉取
 
-为满足“归档预热后再开放写入”的需求，`BootstrapState` 增加可选字段：
-
-- `write_gate`: `Open | ClosedByInitCluster`
-- `archive.init_cluster`: `Option<InitClusterArchiveConfig>`
-
-当 `archive.init_cluster` 被设置时，集群默认进入 `ClosedByInitCluster`，只接受只读请求；必须执行 `rimio-adm sync-archive` 成功后，将 `write_gate` 切到 `Open`。
-
-写闸门为正文强约束（非开放项）：
-
-- `write_gate=ClosedByInitCluster` 时，允许 API：`health` / `nodes` / `list` / `get` / `head`。
-- `write_gate=ClosedByInitCluster` 时，拒绝 API：`put` / `delete` / 任意 internal write（含副本写入与修复写入）。
-- 拒绝写请求统一返回 `503 ServiceUnavailable`，错误码 `ClusterWriteDisabled`。
-
 ---
 
 ## Memberlist 集成方案（替代自研 Gossip 协议）
@@ -215,7 +201,6 @@ SlotRecord {
 - 路由优先读取本地 `SlotMap` 快照
 - 若 slot 记录缺失，按 bootstrap 初始布局进行确定性回退
 - 写路径将 `slot_epoch` 下传到内部复制 API（`internal_put_part/head`）
-- 在 `write_gate=ClosedByInitCluster` 时，写路径在入口处短路拒绝（不进入复制阶段）
 - 读路径优先本地 primary/healthy 副本，必要时按 slot 副本集合降级
 
 ---
@@ -333,9 +318,6 @@ archive:
     credentials:
       access_key_id: xxx
       secret_access_key: yyy
-  init_cluster:
-    enabled: true
-    manifest_url: s3://rimio-archive/bootstrap/manifest.json
 ```
 
 建议新增配置结构：
@@ -346,7 +328,6 @@ archive:
 - `persist_dir` 为可选项，未配置时自动落到 `/tmp` 默认目录
 - `rimio start --conf ... --node ...` 启动方式
 - `rimio join REGISTRY_URL --node ...` 入群方式（不带 `--conf`）
-- `archive.init_cluster` 控制启动后的默认写入闸门
 
 ---
 
@@ -361,14 +342,12 @@ archive:
 4. `rimio-core/src/registry/factory.rs`
    - 支持 `backend = gossip` 并构造 memberlist 实例
 5. `rimio-server/src/config.rs`
-   - 新增 gossip/memberlist 配置解析与 `archive.init_cluster` 字段
+   - 新增 gossip/memberlist 配置解析
 6. `rimio-server/src/server/mod.rs`
-   - `resolve_replica_nodes` 改为优先读取 slot map，并在 `write_gate=ClosedByInitCluster` 时拒绝写请求
+   - `resolve_replica_nodes` 改为优先读取 slot map
 7. `rimio-server/src/main.rs`（或命令层）
    - 增加 `start` / `join` 子命令与参数校验（`join` 无 `--conf`、参数与 registry 配置一致、节点名唯一、`--force-takeover` 约束）
-8. `rimio-adm`
-   - 增加 `sync-archive` 完成后切换 `write_gate -> Open`
-9. internal API
+8. internal API
    - 写复制接口增加 `slot_epoch` 头/字段
 
 ---
@@ -391,7 +370,6 @@ archive:
 
 ### Phase 2：收敛与清理
 
-- 打通 `archive.init_cluster` + `rimio-adm sync-archive` 写闸门流程
 - 在验证稳定后，将文档与配置示例全面收敛到 gossip-only 推荐路径
 
 ---
@@ -408,9 +386,7 @@ archive:
    - 验证 `slot_epoch` fencing 防止旧主提交
 5. **CLI/配置约束测试**
    - `start`/`join` 参数校验、`join` 无 `--conf`、参数与 registry 一致性校验、同名活跃节点拒绝、`cluster://` URL 解析
-6. **写闸门测试**
-   - 配置 `archive.init_cluster` 后仅允许 `health/nodes/list/get/head`，拒绝 `put/delete/internal write`；`sync-archive` 后恢复写入
-7. **兼容回归**
+6. **兼容回归**
    - 现有 API 与 S3 integration 不回归
 
 建议补充 TLA+ 模型检查：
@@ -425,14 +401,12 @@ archive:
 
 以下能力明确记录为 TODO，本期先不实现：
 
-1. `write_gate` 状态变更的原子化语义（CAS/版本冲突裁决）。
-2. `rimio-adm sync-archive` 的完整恢复语义（部分成功、断点续传、幂等重试）。
-3. `cluster://` 的完整语法与错误模型（含 IPv6、重复节点、非法端口等）。
-4. `--force-takeover` 并发争抢时的胜者裁决与冷却窗口策略。
+1. `cluster://` 的完整语法与错误模型（含 IPv6、重复节点、非法端口等）。
+2. `--force-takeover` 并发争抢时的胜者裁决与冷却窗口策略。
 
 本期策略：
 
-- 优先实现主流程可用性（start/join、registry 收敛、写闸门、基础 takeover）。
+- 优先实现主流程可用性（start/join、registry 收敛、基础 takeover）。
 - 对上述 TODO 场景采用 best-effort 行为，必要时通过运维介入恢复。
 
 ---
@@ -462,9 +436,7 @@ archive:
 4. 发生主切换后，旧主无法以过期 `slot_epoch` 写入成功。
 5. `join` 命令不依赖本地 `config.yaml`，且在参数提供时与 registry 配置严格一致。
 6. `start/join` 命令满足节点名唯一约束，且 `cluster://` 地址可用任一 seed 入群。
-7. 配置 `archive.init_cluster` 时，集群默认拒绝写，`rimio-adm sync-archive` 后开放写入。
-8. README 与 integration 默认流程不再要求“registry Redis 必须可达”。
-9. 在 `write_gate=ClosedByInitCluster` 时，API 访问行为严格符合“读白名单/写拒绝”约束与统一错误码。
+7. README 与 integration 默认流程不再要求“registry Redis 必须可达”。
 
 ---
 
