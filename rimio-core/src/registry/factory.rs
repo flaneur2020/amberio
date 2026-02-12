@@ -1,4 +1,7 @@
-use super::{Registry, etcd::EtcdRegistry, redis::RedisRegistry};
+use super::{
+    Registry, etcd::EtcdRegistry, gossip_memberlist::GossipMemberlistRegistry,
+    redis::RedisRegistry,
+};
 use crate::{Result, RimError};
 use std::sync::Arc;
 
@@ -6,8 +9,12 @@ use std::sync::Arc;
 pub struct RegistryBuilder {
     backend: Option<String>,
     namespace: Option<String>,
+    gossip_node_id: Option<String>,
     etcd_endpoints: Option<Vec<String>>,
     redis_url: Option<String>,
+    gossip_bind_addr: Option<String>,
+    gossip_advertise_addr: Option<String>,
+    gossip_seeds: Option<Vec<String>>,
 }
 
 impl RegistryBuilder {
@@ -25,6 +32,11 @@ impl RegistryBuilder {
         self
     }
 
+    pub fn gossip_node_id(mut self, node_id: impl Into<String>) -> Self {
+        self.gossip_node_id = Some(node_id.into());
+        self
+    }
+
     pub fn etcd_endpoints(mut self, endpoints: Vec<String>) -> Self {
         self.etcd_endpoints = Some(endpoints);
         self
@@ -32,6 +44,21 @@ impl RegistryBuilder {
 
     pub fn redis_url(mut self, url: impl Into<String>) -> Self {
         self.redis_url = Some(url.into());
+        self
+    }
+
+    pub fn gossip_bind_addr(mut self, addr: impl Into<String>) -> Self {
+        self.gossip_bind_addr = Some(addr.into());
+        self
+    }
+
+    pub fn gossip_advertise_addr(mut self, addr: impl Into<String>) -> Self {
+        self.gossip_advertise_addr = Some(addr.into());
+        self
+    }
+
+    pub fn gossip_seeds(mut self, seeds: Vec<String>) -> Self {
+        self.gossip_seeds = Some(seeds);
         self
     }
 
@@ -96,6 +123,47 @@ impl RegistryBuilder {
                 }
 
                 let registry = RedisRegistry::new(url, &namespace).await?;
+                Ok(Arc::new(registry))
+            }
+            "gossip" => {
+                let bind_addr = self.gossip_bind_addr.as_deref().unwrap_or_default().trim();
+                if bind_addr.is_empty() {
+                    return Err(RimError::Config(
+                        "gossip bind_addr is required for gossip backend".to_string(),
+                    ));
+                }
+
+                let node_id = self.gossip_node_id.as_deref().unwrap_or_default().trim();
+                if node_id.is_empty() {
+                    return Err(RimError::Config(
+                        "gossip node_id is required for gossip backend".to_string(),
+                    ));
+                }
+
+                let advertise_addr = self
+                    .gossip_advertise_addr
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+
+                let seeds = self
+                    .gossip_seeds
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|seed| seed.trim().to_string())
+                    .filter(|seed| !seed.is_empty())
+                    .collect();
+
+                let registry = GossipMemberlistRegistry::new(
+                    &namespace,
+                    node_id,
+                    bind_addr,
+                    advertise_addr.as_deref(),
+                    seeds,
+                )
+                .await?;
                 Ok(Arc::new(registry))
             }
             other => Err(RimError::Config(format!(

@@ -276,6 +276,7 @@ async fn run_join(join: JoinInvocation) {
                 url: format!("redis://{}", first_seed),
                 pool_size: 8,
             }),
+            gossip: None,
         },
         initial_cluster: config::InitialClusterConfig {
             nodes: vec![config::InitialNodeConfig {

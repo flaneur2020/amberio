@@ -60,6 +60,7 @@ pub struct RegistryConfig {
     pub namespace: Option<String>,
     pub etcd: Option<EtcdConfig>,
     pub redis: Option<RedisConfig>,
+    pub gossip: Option<GossipConfig>,
 }
 
 impl RegistryConfig {
@@ -76,6 +77,7 @@ impl RegistryConfig {
 pub enum RegistryBackend {
     Etcd,
     Redis,
+    Gossip,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +90,15 @@ pub struct RedisConfig {
     pub url: String,
     #[serde(default = "default_redis_pool_size")]
     pub pool_size: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GossipConfig {
+    pub bind_addr: String,
+    #[serde(default)]
+    pub advertise_addr: Option<String>,
+    #[serde(default)]
+    pub seeds: Vec<String>,
 }
 
 fn default_redis_pool_size() -> usize {
@@ -258,6 +269,25 @@ impl Config {
                     .unwrap_or_default();
 
                 builder.backend("redis").redis_url(url)
+            }
+            RegistryBackend::Gossip => {
+                let gossip = self.registry.gossip.clone().unwrap_or(GossipConfig {
+                    bind_addr: String::new(),
+                    advertise_addr: None,
+                    seeds: Vec::new(),
+                });
+
+                let mut builder = builder
+                    .backend("gossip")
+                    .gossip_node_id(self.current_node.clone())
+                    .gossip_bind_addr(gossip.bind_addr)
+                    .gossip_seeds(gossip.seeds);
+
+                if let Some(advertise_addr) = gossip.advertise_addr {
+                    builder = builder.gossip_advertise_addr(advertise_addr);
+                }
+
+                builder
             }
         }
     }
