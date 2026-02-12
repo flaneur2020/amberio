@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
     pub current_node: String,
     pub registry: RegistryConfig,
     pub initial_cluster: InitialClusterConfig,

@@ -32,41 +32,80 @@ Non-goals (important!):
 - No multi-tenant support.
 - Not built for dynamic cluster autoscaling or rebalancing (dynamic node addition and removal are not supported by design).
 
-## Quick guide: bootstrap a local cluster
+## Usage
 
-Prerequisites:
-
-- Redis reachable at `redis://127.0.0.1:6379` (will remove redis dependency soon)
-- Rust toolchain installed
-
-1) Build:
+1) Build binary:
 
 ```bash
 cargo build --release -p rimio-server --bin rimio
 ```
 
-2) Prepare config + local disks:
+2) Prepare local disks:
 
 ```bash
-cp config.example.yaml config.yaml
 mkdir -p demo/node1/disk demo/node2/disk demo/node3/disk
 ```
 
-3) Initialize cluster state once (first wins):
+3) Create `config.yaml` (simple example):
 
 ```bash
-./target/release/rimio server --config config.yaml --current-node node-1 --init
+cat > config.yaml <<'EOF'
+registry:
+  backend: redis
+  namespace: local-cluster-001
+  redis:
+    url: "redis://127.0.0.1:6379"
+    pool_size: 10
+
+initial_cluster:
+  nodes:
+    - node_id: "node-1"
+      bind_addr: "127.0.0.1:19080"
+      advertise_addr: "127.0.0.1:19080"
+      disks:
+        - path: demo/node1/disk
+    - node_id: "node-2"
+      bind_addr: "127.0.0.1:19081"
+      advertise_addr: "127.0.0.1:19081"
+      disks:
+        - path: demo/node2/disk
+    - node_id: "node-3"
+      bind_addr: "127.0.0.1:19082"
+      advertise_addr: "127.0.0.1:19082"
+      disks:
+        - path: demo/node3/disk
+  replication:
+    min_write_replicas: 2
+    total_slots: 2048
+
+# Optional archive backend
+# archive:
+#   archive_type: s3
+#   s3:
+#     bucket: "rimio-archive"
+#     region: "us-east-1"
+#     # endpoint: "http://127.0.0.1:9000"
+#     # allow_http: true
+#     credentials:
+#       access_key_id: "YOUR_ACCESS_KEY_ID"
+#       secret_access_key: "YOUR_SECRET_ACCESS_KEY"
+EOF
 ```
 
-4) Start all nodes from the same config (using CLI override):
+4) Start `node-1`:
 
 ```bash
-./target/release/rimio server --config config.yaml --current-node node-1
-./target/release/rimio server --config config.yaml --current-node node-2
-./target/release/rimio server --config config.yaml --current-node node-3
+./target/release/rimio start --conf config.yaml --node node-1
 ```
 
-5) Verify:
+5) Join `node-2` and `node-3`:
+
+```bash
+./target/release/rimio join redis://127.0.0.1:6379 --node node-2
+./target/release/rimio join redis://127.0.0.1:6379 --node node-3
+```
+
+6) Verify:
 
 ```bash
 curl http://127.0.0.1:19080/_/api/v1/healthz

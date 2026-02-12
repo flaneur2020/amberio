@@ -1,8 +1,6 @@
 # Example configuration for Rimio.
 # Optimized for small edge clusters with stable topology.
 
-current_node: node-1
-
 # Registry backend: choose one backend and configure it below.
 registry:
   backend: redis # options: etcd | redis
