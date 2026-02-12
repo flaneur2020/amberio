@@ -1,38 +1,31 @@
 # Rimio 设计文档（RFC 0010）
 
-> 目标：不再让用户在 `registry.gossip` 中单独配置 `bind_addr/advertise_addr`；改为以 `initial_cluster.nodes[*].bind_addr/advertise_addr` 作为唯一地址真相源，并通过 internal 接口补齐 gossip 入群与状态同步所需信息。
+> 目标：不再让用户在 `registry.gossip` 中单独配置 `bind_addr/advertise_addr`，并且每个节点只暴露一个对外端口（即 `initial_cluster.nodes[*].bind_addr/advertise_addr` 的业务端口）。
 
 ## 背景
 
-当前 `gossip` backend 需要单独配置：
+当前 `gossip` backend 依赖独立地址配置，且默认思路倾向额外 gossip 端口。这与我们希望的两点不一致：
 
-- `registry.gossip.bind_addr`
-- `registry.gossip.advertise_addr`
-- `registry.gossip.seeds`
+1. 地址配置单一来源（避免重复配置）；
+2. 每节点只提供一个对外端口（简化运维和安全策略）。
 
-同时 `initial_cluster.nodes[]` 已经声明了节点 `bind_addr/advertise_addr`，导致地址配置存在重复来源，运维上容易出现不一致。
-
-我们希望：
-
-1. 简化配置（单一地址来源）；
-2. 保留 `memberlist` 作为 gossip/membership 底座；
-3. 让 `start/join` 仍保持清晰可控。
+我们已确认 `memberlist` 支持自定义 `Transport`，因此可以保留 `memberlist` 的 membership/merge 语义，同时将传输落在现有 internal HTTP 通道上。
 
 ---
 
 ## 设计目标
 
-1. `gossip` 地址不再由独立配置项维护；
-2. `initial_cluster` 成为节点地址唯一真相源；
-3. `join` 仅需 `REGISTRY_URL + --node`（可选校验参数保留）；
-4. 不破坏现有 `redis://` / `etcd://` registry 路径；
-5. 保持实现复杂度可控（早期项目优先简单落地）。
+1. 用户不再配置 `registry.gossip.bind_addr/advertise_addr`；
+2. `initial_cluster.nodes[]` 是节点地址唯一真相源；
+3. gossip/memberlist 通信复用现有对外服务端口（单端口）；
+4. `start/join` 语义保持稳定，`join` 仍以 registry/bootstrap 为真相；
+5. 保留 `redis://`、`etcd://` 路径兼容。
 
 ## 非目标
 
-1. 不在本期实现完整动态扩容/重分片；
-2. 不引入复杂多协议混部策略；
-3. 不重写一套自研 memberlist 等价协议栈。
+1. 不在本期实现动态扩缩容/重分片；
+2. 不引入多种 gossip 协议并行；
+3. 不为了单端口放弃 `memberlist`（除非后续验证不可行）。
 
 ---
 
@@ -40,71 +33,53 @@
 
 ## 结论（TL;DR）
 
-- **方案整体可行**，但有一个关键边界：
-  - 若继续使用 `memberlist` crate，**不能**让 gossip 与 HTTP/internal 服务直接复用同一个监听 socket。
-- 推荐落地方式：
-  - 地址真相源来自 `initial_cluster.nodes[]`；
-  - gossip 地址在运行时由节点地址**确定性派生**（无需用户单独配置）；
-  - internal API 负责 bootstrap/gossip 元信息发现与反熵辅助。
+- **可行**：`memberlist` 支持自定义 `Transport`，可以把 packet/stream 映射到 internal API。
+- **关键约束**：不能直接使用默认 `NetTransport` 与 axum 共享同一监听 socket；但可通过自定义 transport 在应用层复用同一端口。
 
-## 关键原因
+## 原因说明
 
-1. `memberlist` 需要独立传输层（TCP/UDP/stream layer），不能直接挂在 axum 的 HTTP 路由上；
-2. `bind_addr` 当前用于业务 HTTP 监听，若同端口复用会产生协议冲突；
-3. 因此“只用 node 地址 + 不让用户填 gossip 地址”是可行的，但实现上需**派生 gossip 地址**或单独传输端口约定。
+1. 默认 `NetTransport` 需要独立网络监听（TCP/UDP/QUIC）；
+2. axum/hyper 已占用业务端口，默认 memberlist 传输无法直接挂到同一个 socket；
+3. 但 `memberlist::Transport` trait 允许自实现 `send_to/open/packet/stream`，因此可构建“HTTP internal transport”。
 
-## 可行方案对比
+## 方案对比
 
-### A. 同端口复用（HTTP 与 memberlist 共用 `bind_addr`）
+### A. 默认 NetTransport + 独立 gossip 端口
 
-- 可行性：**低（不推荐）**
-- 问题：监听冲突、协议复用复杂、实现侵入大。
+- 可行性：高
+- 与目标冲突：高（不满足单端口）
 
-### B. 地址派生（推荐）
+### B. 地址派生（service_port + offset）
 
-- 可行性：**高（推荐）**
-- 思路：
-  - 主机部分来自 `initial_cluster.nodes[*].bind_addr/advertise_addr`；
-  - gossip 端口通过确定性规则派生（例如 `service_port + offset`）；
-  - 用户不再配置 gossip bind/advertise。
+- 可行性：高
+- 与目标冲突：中（仍是双端口）
 
-### C. 纯 internal API gossip（不使用 memberlist 传输）
+### C. 自定义 internal transport（推荐）
 
-- 可行性：**中（本期不推荐）**
-- 问题：会演变为自研 gossip/failure detector，偏离“复用 memberlist”目标。
+- 可行性：中高（可做）
+- 复杂度：中（需要实现 transport 适配层）
+- 与目标匹配：高（单端口）
 
 ---
 
-## 提案（推荐方案 B）
+## 提案（推荐方案 C）
 
-## 1) 配置模型调整
+## 1) 配置模型
 
-### 现状（简化）
+### 用户侧配置
 
-```yaml
-registry:
-  backend: gossip
-  gossip:
-    bind_addr: 0.0.0.0:8400
-    advertise_addr: 10.0.0.1:8400
-    seeds: [10.0.0.2:8400]
-```
+- 去掉（或忽略）`registry.gossip.bind_addr/advertise_addr`；
+- `registry.gossip` 仅保留策略参数（如超时、fanout、加密选项）；
+- 节点地址统一来自 `initial_cluster.nodes[*].bind_addr/advertise_addr`。
 
-### 目标
-
-- 删除（或弃用）用户侧：`registry.gossip.bind_addr` / `registry.gossip.advertise_addr`；
-- 节点地址统一从 `initial_cluster.nodes[]` 获取；
-- `registry.gossip` 仅保留可选“全局策略参数”（如 `port_offset`、`fanout`、`timeouts`）。
-
-示意：
+示例：
 
 ```yaml
 registry:
   backend: gossip
   namespace: local-cluster-001
   gossip:
-    # 可选，默认 10000
-    port_offset: 10000
+    transport: internal_http
 
 initial_cluster:
   nodes:
@@ -113,98 +88,163 @@ initial_cluster:
       advertise_addr: 127.0.0.1:19080
 ```
 
-## 2) gossip 地址派生规则
+## 2) internal transport 设计
 
-给定节点 `service_bind_addr` 与 `service_advertise_addr`：
+在 `memberlist::Transport` 适配层中：
 
-- `gossip_bind_addr = host(service_bind_addr):(port(service_bind_addr) + port_offset)`
-- `gossip_advertise_addr = host(service_advertise_addr):(port(service_advertise_addr) + port_offset)`
+1. `send_to(addr, packet)`
+   - 映射为 HTTP `POST /internal/v1/gossip/packet`
+2. `open(addr, deadline)`
+   - 映射为 `WebSocket` 或 `HTTP/2 CONNECT`：`/internal/v1/gossip/stream`
+3. `packet()` / `stream()`
+   - 由 internal handler 将入站请求转发到 transport 内部 channel
+4. `Connection` trait
+   - 基于 websocket/h2 双向流实现 reader/writer split
 
-约束：
+说明：
 
-1. 派生端口必须在 `u16` 范围；
-2. 派生地址冲突则启动失败并给出明确错误；
-3. `join --listen/--advertise-addr` 仅用于 service 地址一致性校验，不再直接作为 gossip bind/advertise 输入。
+- 这不是自研 gossip 协议，仍由 memberlist 上层处理消息语义；
+- 我们仅替换“消息搬运层”。
 
-## 3) internal API（用于 gossip 辅助信息）
+## 3) internal API（最小集合）
 
-新增只读 internal 接口（最小集）：
+1. `POST /internal/v1/gossip/packet`
+   - body：memberlist packet payload
+2. `GET /internal/v1/gossip/stream`（upgrade）
+   - 双向可靠流，用于 memberlist stream 通信
+3. `GET /internal/v1/cluster/bootstrap`
+   - join 初始化读取 bootstrap state
+4. `GET /internal/v1/cluster/gossip-seeds`
+   - 返回 service 地址列表（非派生地址）
 
-1. `GET /internal/v1/cluster/bootstrap`
-   - 返回 bootstrap state（与 registry 版本一致）
-2. `GET /internal/v1/cluster/gossip-seeds`
-   - 返回当前节点视角下可用 gossip seed 地址列表（已派生后的地址）
+## 4) 单端口语义
 
-用途：
+- 对外仅 `bind_addr` 一个端口；
+- 业务 API、internal API、gossip transport 共用该端口；
+- 通过路径/upgrade 区分流量类型。
 
-- `join cluster://...` 可先打任一可达 seed 的 internal API，获取 bootstrap 与 seeds；
-- 降低命令行 seed 维护成本；
-- 为后续反熵诊断提供统一观测入口。
-
-## 4) start/join 行为
+## 5) start/join 行为
 
 ### `start --conf ... --node ...`
 
-1. 从 `config.yaml` 获取 `initial_cluster`；
-2. 根据当前 `node_id` 计算本地 gossip 地址；
-3. 若 registry 已有 bootstrap -> 走 join 语义；否则建群。
+1. 从 `initial_cluster` 查当前 node service 地址；
+2. 启动 HTTP/internal server（单端口）；
+3. 以 internal transport 初始化 memberlist。
 
-### `join REGISTRY_URL --node ...`
+### `join cluster://seed1:port,seed2:port --node ...`
 
-1. `cluster://` 视为 service seed 地址；
-2. 从 seed internal API 拉 bootstrap + gossip-seeds；
-3. 校验 `--node` 存在且参数一致；
-4. 按派生地址启动 memberlist 并 join。
+1. `cluster://` 地址即 service seed 地址；
+2. 先从任一 seed 拉 `bootstrap` + `gossip-seeds`；
+3. 再通过 internal transport 加入 memberlist。
 
 ---
 
 ## 兼容性与迁移
 
-1. 保留一小段兼容窗口：
-   - 若配置里仍有 `registry.gossip.bind_addr/advertise_addr`，记录 warning 并忽略；
-2. 文档与示例统一迁移到“node 地址单来源”；
-3. `redis://`、`etcd://` join 路径保持不变。
+1. 兼容窗口内：若读取到旧 `registry.gossip.bind_addr/advertise_addr`，打印 warning 并忽略；（不需要，请直接干掉）
+2. 文档、示例统一改为单端口模型；
+3. `redis://` 与 `etcd://` join 行为不变。
 
 ---
 
 ## 对代码的影响点
 
-1. `rimio-server/src/config.rs`
-   - Gossip 配置结构裁剪（去掉 bind/advertise）；
-   - 新增 `port_offset`（可选）。
-2. `rimio-server/src/main.rs`
-   - `start/join` 地址派生逻辑；
-   - `cluster://` join 的 seed/internal-bootstrap 流程。
-3. `rimio-server/src/server/mod.rs` + internal handlers
-   - 增加 `bootstrap` 与 `gossip-seeds` internal 只读接口。
-4. `rimio-core/src/registry/factory.rs`
-   - gossip builder 输入从“显式地址配置”改为“派生后地址”。
+1. `rimio-core`
+   - 新增 `registry/gossip_internal_transport.rs`（实现 `memberlist::Transport`）
+2. `rimio-server/src/server/internal`
+   - 增加 gossip packet/stream handlers
+3. `rimio-server/src/main.rs`
+   - 调整 start/join 初始化顺序：先 internal server 可用，再 join memberlist
+4. `rimio-server/src/config.rs`
+   - gossip 配置裁剪（移除 bind/advertise，新增 transport 策略字段）
 
 ---
 
 ## 风险与缓解
 
-1. **风险：派生端口与现有端口冲突**
-   - 缓解：启动前端口探测 + 明确报错 + 可配置 `port_offset`。
-2. **风险：join 早期 seed 不可达**
-   - 缓解：`cluster://` 多 seed，任一可达即可。
-3. **风险：地址变更导致历史节点入群失败**
-   - 缓解：bootstrap 版本化 + 变更需全量重启窗口。
+1. **风险：HTTP 封装带来额外延迟**
+   - 缓解：优先内网部署、压测校准 memberlist interval/timeout。
+2. **风险：stream 通道稳定性（WebSocket/h2）**
+   - 缓解：实现重连与 deadline、增加 backpressure 指标。
+3. **风险：单端口下内部接口暴露面扩大**
+   - 缓解：internal path 鉴权（token/mTLS/allowlist）+ 默认仅集群网段可达。
 
 ---
 
 ## 验收标准
 
-1. 用户配置中不再需要 `registry.gossip.bind_addr/advertise_addr`；
-2. `start/join` 均可从 `initial_cluster` 地址派生 gossip 通信地址并成功运行；
-3. `join cluster://...` 可经 internal API 获得 bootstrap + gossip seeds；
-4. `redis://` 与 `etcd://` join 路径行为不回归；
-5. 相关集成测试覆盖地址派生、seed 发现、冲突报错路径。
+1. 每节点仅暴露一个服务端口；
+2. gossip 模式下用户无需配置 `registry.gossip.bind_addr/advertise_addr`；
+3. memberlist 在 internal transport 上可完成 join/suspect/dead/merge；
+4. `join cluster://...` 可完成 bootstrap + 入群；
+5. `redis://` / `etcd://` 路径无回归。
 
 ---
 
+## 分期建议
+
+### Phase 1（最小可用）
+
+- 实现 internal packet 通道 + 基础 stream；
+- 打通 3 节点 join/leave；
+- 完成最小集成测试。
+
+### Phase 2（稳定化）
+
+- 增加鉴权、限流、观测指标；
+- 压测并调优 memberlist 参数；
+- 清理旧配置项。
+
+---
+
+## TODO 清单（执行版）
+
+### P0：设计冻结（先定边界）
+
+- [ ] 冻结 stream 实现方案（优先 `WebSocket`，`HTTP/2 CONNECT` 作为后备）
+- [ ] 冻结 internal gossip API 契约（路径、method、payload、错误码）
+- [ ] 冻结 `cluster://` 到 internal seed 发现流程（失败重试、超时、回退）
+- [ ] 明确单端口安全基线（默认鉴权策略 + 网段限制）
+
+### P1：核心实现（memberlist + custom transport）
+
+- [ ] 在 `rimio-core` 新增 `gossip_internal_transport`（实现 `memberlist::Transport`）
+- [ ] 实现 `send_to` -> `POST /internal/v1/gossip/packet`
+- [ ] 实现 `open` + `Connection`（双向流，reader/writer split）
+- [ ] 实现 `packet()` / `stream()` 入站分发与 backpressure
+- [ ] 完成 transport 错误分类（remote failure / local failure）
+- [ ] 先打通 3 节点 `join/suspect/dead/merge` 冒烟
+
+### P1：服务端接口与启动时序
+
+- [ ] 在 `rimio-server` 增加 `gossip packet/stream` internal handlers
+- [ ] 增加 `GET /internal/v1/cluster/bootstrap`
+- [ ] 增加 `GET /internal/v1/cluster/gossip-seeds`
+- [ ] 调整启动顺序：internal server ready -> memberlist join -> register node
+- [ ] `join cluster://...` 先 bootstrap，再进入 memberlist join
+
+### P1：配置与兼容
+
+- [ ] 裁剪 `registry.gossip.bind_addr/advertise_addr`（配置可不再出现）
+- [ ] 保留兼容窗口：若旧字段存在，打印 warning 并忽略
+- [ ] 更新 `config.example.yaml` 与 `README` 单端口示例
+- [ ] 校验 `initial_cluster.nodes[*].bind_addr/advertise_addr` 完整性
+
+### P1：测试清单
+
+- [ ] transport 单测：packet 编解码、stream 读写、deadline、close 语义
+- [ ] 集成测试：单端口 3 节点 `start + join`
+- [ ] 故障测试：seed 不可达、stream 断开、乱序/重复包
+- [ ] 回归测试：`redis://`、`etcd://` 路径不回归
+
+### P2：稳定化与运维
+
+- [ ] 压测（N=3/N=5）：收敛时延、误判率、重连成功率
+- [ ] 安全加固：鉴权默认开启（token/mTLS 至少一种）
+- [ ] 指标完善：packet/stream QPS、失败率、队列水位、join latency
+- [ ] 清理兼容逻辑（移除旧 gossip 地址字段）
 ## 开放问题
 
-1. `port_offset` 是否固定默认 + 禁止配置，还是允许环境差异化配置？
-2. internal bootstrap API 是否需要鉴权（当前默认内网信任）？
-3. 是否需要提供 `rimio adm derive-gossip-addrs` 诊断命令？
+1. stream 传输优先选 `WebSocket` 还是 `HTTP/2 CONNECT`？
+2. internal gossip 接口是否默认强制鉴权（建议是）？
+3. 是否需要额外诊断命令：`rimio adm gossip-peers`？
