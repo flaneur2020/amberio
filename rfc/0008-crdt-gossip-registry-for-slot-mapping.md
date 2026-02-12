@@ -1,6 +1,6 @@
 # Rimio 设计文档（RFC 0008）
 
-> 提议引入“Redis Cluster 风格（无中心）+ CRDT 收敛 + Gossip 传播”的 registry 子系统，逐步替换当前对外部 Redis 的强依赖。
+> 提议引入“Redis Cluster 风格（无中心）+ CRDT 收敛 + Gossip 传播”的 registry 子系统，替换当前对外部 Redis 的强依赖；其中 membership 与 gossip 传播直接复用 `memberlist` crate，而非自研协议栈。
 
 ## 背景
 
@@ -30,7 +30,10 @@ Redis Cluster 的核心启发是：
 2. **最终一致收敛**：在短时分区、节点抖动、重启后，状态可自动收敛。
 3. **保持当前固定 slot 模型**：继续使用 `total_slots`（默认 2048）与确定性路由。
 4. **兼容现有写入语义**：不改变 quorum 写与 generation/head 语义。
-5. **可迁移落地**：支持与现有 Redis registry 双写/双读阶段，降低切换风险。
+5. **复用成熟实现**：membership、failure detection、gossip 传播优先采用 `memberlist`，避免自研网络协议。
+6. **直接切换落地**：采用一次性切换到 gossip registry，不引入双写/双读迁移阶段。
+7. **统一引导流程**：通过 `start/join` 子命令显式区分“建群”和“入群”，并约束节点命名唯一性。
+8. **受控恢复写入**：支持 `archive.init_cluster` 写入闸门，在归档回补完成前拒绝写请求。
 
 ## 非目标
 
@@ -38,6 +41,8 @@ Redis Cluster 的核心启发是：
 2. 本 RFC 不引入自动扩缩容与在线重分片（与当前 non-goal 保持一致）。
 3. 本 RFC 不改变对象数据面（part/head/tombstone）读写协议。
 4. 本 RFC 不替代归档层 Redis/S3 逻辑（仅聚焦 registry）。
+5. 本 RFC 不支持混部运行（不考虑 gossip 与 redis/etcd backend 混跑）。
+6. 本期（MVP）不追求覆盖所有边界一致性细节；允许少量短时不一致，以实现简洁优先。
 
 ---
 
@@ -50,9 +55,11 @@ Redis Cluster 的核心启发是：
 2. **CRDT 数据模型（Merge-safe）**
    - 节点成员与 slot 分配采用可交换、可结合、幂等的合并规则
 3. **Gossip 传播层（Redis Cluster 风格）**
-   - 周期 PING/PONG + 增量状态传播 + 周期性 anti-entropy 全量校对
+   - 基于 `memberlist` 的成员传播与故障探测 + Rimio CRDT 增量同步
 
 该模型下，客户端路由读取本地视图，不再每次请求访问外部集中式注册中心。
+
+说明：本 RFC 不再建议实现自定义 gossip wire 协议，改为将精力集中在 CRDT 数据模型与业务语义（slot_epoch fencing、路由回退、反熵）上。
 
 ---
 
@@ -118,30 +125,67 @@ SlotRecord {
 - 首次成功提案后通过 gossip 广播
 - 新节点 join 后若本地缺失则主动拉取
 
+为满足“归档预热后再开放写入”的需求，`BootstrapState` 增加可选字段：
+
+- `write_gate`: `Open | ClosedByInitCluster`
+- `archive.init_cluster`: `Option<InitClusterArchiveConfig>`
+
+当 `archive.init_cluster` 被设置时，集群默认进入 `ClosedByInitCluster`，只接受只读请求；必须执行 `rimio-adm sync-archive` 成功后，将 `write_gate` 切到 `Open`。
+
+写闸门为正文强约束（非开放项）：
+
+- `write_gate=ClosedByInitCluster` 时，允许 API：`health` / `nodes` / `list` / `get` / `head`。
+- `write_gate=ClosedByInitCluster` 时，拒绝 API：`put` / `delete` / 任意 internal write（含副本写入与修复写入）。
+- 拒绝写请求统一返回 `503 ServiceUnavailable`，错误码 `ClusterWriteDisabled`。
+
 ---
 
-## Gossip 协议（Redis Cluster 风格）
+## Memberlist 集成方案（替代自研 Gossip 协议）
 
-### 消息类型
+### 复用边界
 
-1. `MEET`：新节点加入握手
-2. `PING`：定期探活 + 摘要交换
-3. `PONG`：探活应答
-4. `UPDATE`：增量 CRDT op 传播（delta）
-5. `FAIL_REPORT`：故障怀疑投票
-6. `STATE_SYNC`：反熵全量快照（低频）
+由 `memberlist` 负责：
 
-### 传播机制
+1. 节点发现（join/leave）
+2. 存活探测与故障怀疑（alive/suspect/dead）
+3. gossip 扩散与反熵底座
 
-- 周期 gossip：默认每 `500ms` 向 `fanout=3` 个随机节点发送 `PING`
-- 增量传播：每条本地状态更新打包为 op-log delta，并 piggyback 到 `PING/UPDATE`
-- 全量校对：每 `10s` 做 digest 对比，不一致触发 `STATE_SYNC`
+由 Rimio 负责：
 
-### 故障判定（借鉴 PFAIL/FAIL）
+1. CRDT 结构定义（Membership/SlotMap/BootstrapState）
+2. slot 主从切换规则（`slot_epoch`）
+3. 写入 fencing 与路由语义
 
-1. 节点在 `suspect_timeout`（默认 15s）内无心跳 -> 标记 `Suspect`
-2. 收到多数节点的 `FAIL_REPORT`（`> N/2`）-> 标记 `Failed`
-3. 节点重启后提升 `incarnation` 并广播，可覆盖旧 `Failed` 结论
+### 事件与数据流
+
+1. 节点启动后通过 seed 列表 `join` 到 memberlist 集群。
+2. memberlist 成员变化事件驱动本地 Membership CRDT 更新。
+3. Rimio 将 slot/bootstrap 的 delta 作为应用层 payload 广播。
+4. 节点收到 payload 后按 CRDT merge 规则合并并持久化。
+5. 周期 digest 比对仍保留；发现偏差后触发全量 `STATE_SYNC`（Rimio 内部 RPC）。
+
+### 编码与兼容
+
+- Gossip payload 使用带版本号的 envelope（例如 `version`, `kind`, `payload`）。
+- 首版建议 `kind` 至少包含：`slot_delta`、`bootstrap_snapshot`。
+- 对未知版本 payload 执行“忽略并记录指标”，避免集群升级期间硬失败。
+
+### 故障判定映射
+
+- memberlist 的节点状态映射为 Rimio `NodeRecord.status`：
+  - alive -> `Alive`
+  - suspect -> `Suspect`
+  - dead/left -> `Failed` / `Leaving`
+- 节点重启仍通过 `incarnation` 递增覆盖旧状态，保持 CRDT 可收敛。
+
+### 入群地址格式（REGISTRY_URL）
+
+在支持 gossip/memberlist 后，`join` 命令接收统一 `REGISTRY_URL`：
+
+- 形式：`cluster://seed1:8400,seed2:8400,seed3:8400`
+- 语义：只要其中任意一个 seed 可连接，节点即可完成入群
+- 解析：`cluster://` 仅用于 CLI 语义层，底层仍转换为 memberlist seed 地址列表
+- 约束：`join` 不读取本地 `config.yaml`，节点配置以 registry 中的 bootstrap state 为唯一真相源
 
 ---
 
@@ -171,6 +215,7 @@ SlotRecord {
 - 路由优先读取本地 `SlotMap` 快照
 - 若 slot 记录缺失，按 bootstrap 初始布局进行确定性回退
 - 写路径将 `slot_epoch` 下传到内部复制 API（`internal_put_part/head`）
+- 在 `write_gate=ClosedByInitCluster` 时，写路径在入口处短路拒绝（不进入复制阶段）
 - 读路径优先本地 primary/healthy 副本，必要时按 slot 副本集合降级
 
 ---
@@ -190,6 +235,60 @@ SlotRecord {
 
 ---
 
+## 启动与入群流程（CLI）
+
+本 RFC 采用 `start` 自动模式：优先检查 registry 中是否已存在 cluster bootstrap state，
+不存在则建群，存在则按 `join` 语义启动；`join` 保留为无本地配置的纯入群入口。
+
+### 1) 启动（start，自动模式）
+
+```bash
+rimio start --conf config.yaml --node node1
+```
+
+语义：
+
+- `start` 先连接 registry 并检查是否已有 bootstrap state
+- 若 registry 不存在 bootstrap state：按“建群”处理，使用 `config.yaml` 写入首个 `BootstrapState`
+- 若 registry 已存在 bootstrap state：按“join”处理，registry 为唯一配置真相源
+- 在“已建群”路径下，`start` 提供的本地参数（如 `--node`）与 registry 对应项必须一致，不一致直接拒绝启动
+
+### 2) 入群（join）
+
+```bash
+rimio join REGISTRY_URL --node node2 --listen 0.0.0.0:482 --advertise-addr 192.19.0.1
+```
+
+语义：
+
+- `REGISTRY_URL` 支持 `cluster://seed1:8400,seed2:8400`（任一可达即可）
+- `join` 不接受 `--conf`；节点拓扑、disks、replication、archive 等全部从 registry 读取
+- `--node` 必须在 registry 保存的 bootstrap state 中预定义，且集群中不允许两个活跃同名节点
+- `--listen`、`--advertise-addr` 为可选一致性校验参数（若提供必须与 registry 一致）
+
+参数约束：
+
+1. `join` 启动时必须先从 `REGISTRY_URL` 拉取 bootstrap state；拉取失败直接报错退出。
+2. `--node` 若不在 bootstrap state 的 `nodes[]` 列表中，直接报错退出。
+3. 若提供 `--listen` 或 `--advertise-addr`，其值必须与 bootstrap state 中该 `node_id` 的配置一致；不一致则拒绝启动。
+4. 若未提供 `--listen` / `--advertise-addr`，则直接使用 bootstrap state 中的值。
+5. 若存在同名 `Alive` 节点，`join` 直接拒绝，返回冲突错误。
+6. 若存在同名 `Suspect` 节点，默认拒绝；仅在显式提供 `--force-takeover` 且旧实例 `last_heartbeat_age >= fail_timeout` 时允许接管。
+7. 若同名旧实例已是 `Failed` / `Leaving`，仅当新实例 `incarnation` 更高时允许接管。
+
+`start` 与 `join` 一致性规则：
+
+- 当 bootstrap state 已存在时，`start` 与 `join` 走同一套校验逻辑。
+- 所有 join 阶段可覆盖参数都必须与 registry 中保存配置一致；不一致则拒绝启动。
+- 不允许通过 `start` 或 `join` 在入群时修改集群拓扑、replication、archive 配置。
+
+`--force-takeover` 约束：
+
+- 仅对同名 `Suspect` 节点生效，对 `Alive` 节点始终无效。
+- 触发 takeover 时必须记录审计日志（`node_id`、旧状态、旧心跳年龄、发起时间）。
+
+---
+
 ## 配置草案
 
 ```yaml
@@ -197,23 +296,57 @@ registry:
   backend: gossip # options: gossip | redis | etcd
   namespace: default
   gossip:
+    provider: memberlist
+    bind_addr: "0.0.0.0:7946"
+    advertise_addr: "127.0.0.1:7946"
     seeds:
-      - "node-1@127.0.0.1:19080"
-      - "node-2@127.0.0.1:19081"
-      - "node-3@127.0.0.1:19082"
+      - "127.0.0.1:7946"
+      - "127.0.0.1:7947"
+      - "127.0.0.1:7948"
     gossip_interval_ms: 500
     full_sync_interval_sec: 10
     suspect_timeout_sec: 15
     fail_timeout_sec: 45
     fanout: 3
-    persist_dir: "./demo/node1/registry"
+    persist_dir: "./demo/node1/registry" # 可选；未配置时默认使用 /tmp/rimio-registry/<node_id>
+
+initial_cluster:
+  nodes:
+    - node_id: "node1"
+      bind_addr: "0.0.0.0:482"
+      advertise_addr: "192.19.0.1"
+      disks:
+        - path: ./demo/node1/disk
+    - node_id: "node2"
+      bind_addr: "0.0.0.0:482"
+      advertise_addr: "192.19.0.2"
+      disks:
+        - path: ./demo/node2/disk
+
+archive:
+  archive_type: s3
+  s3:
+    bucket: rimio-archive
+    region: us-east-1
+    endpoint: http://127.0.0.1:9000
+    allow_http: true
+    credentials:
+      access_key_id: xxx
+      secret_access_key: yyy
+  init_cluster:
+    enabled: true
+    manifest_url: s3://rimio-archive/bootstrap/manifest.json
 ```
 
 建议新增配置结构：
 
 - `RegistryBackend::Gossip`
 - `GossipRegistryConfig`
-- 可选 `dual_write_redis_url`（迁移阶段）
+- `gossip.provider = memberlist`
+- `persist_dir` 为可选项，未配置时自动落到 `/tmp` 默认目录
+- `rimio start --conf ... --node ...` 启动方式
+- `rimio join REGISTRY_URL --node ...` 入群方式（不带 `--conf`）
+- `archive.init_cluster` 控制启动后的默认写入闸门
 
 ---
 
@@ -221,38 +354,45 @@ registry:
 
 1. `rimio-core/src/registry/mod.rs`
    - 新增 `gossip` backend 实现
-2. `rimio-core/src/registry/factory.rs`
-   - 支持 `backend = gossip`
-3. `rimio-server/src/config.rs`
-   - 新增 `gossip` 配置解析
-4. `rimio-server/src/server/mod.rs`
-   - `resolve_replica_nodes` 改为优先读取 slot map
-5. internal API
+2. `rimio-core/Cargo.toml`
+   - 新增 `memberlist` 依赖
+3. `rimio-core/src/registry/gossip_memberlist.rs`
+   - 基于 `memberlist` 封装 `Registry` trait
+4. `rimio-core/src/registry/factory.rs`
+   - 支持 `backend = gossip` 并构造 memberlist 实例
+5. `rimio-server/src/config.rs`
+   - 新增 gossip/memberlist 配置解析与 `archive.init_cluster` 字段
+6. `rimio-server/src/server/mod.rs`
+   - `resolve_replica_nodes` 改为优先读取 slot map，并在 `write_gate=ClosedByInitCluster` 时拒绝写请求
+7. `rimio-server/src/main.rs`（或命令层）
+   - 增加 `start` / `join` 子命令与参数校验（`join` 无 `--conf`、参数与 registry 配置一致、节点名唯一、`--force-takeover` 约束）
+8. `rimio-adm`
+   - 增加 `sync-archive` 完成后切换 `write_gate -> Open`
+9. internal API
    - 写复制接口增加 `slot_epoch` 头/字段
 
 ---
 
 ## 分阶段实施
 
-### Phase 0：实现与观测（不切流量）
+### Phase 0：实现与验证
 
-- 实现 `GossipRegistry` 与 CRDT merge 单测
-- 节点启动时可选开启 gossip，但仍使用 Redis 作为主 registry
+- 实现 `GossipRegistry(memberlist)` 与 CRDT merge 单测
+- 完成 memberlist 集成冒烟（join/leave/suspect/dead）
+- 实现 `start` / `join` CLI 以及节点命名唯一性校验
+- 完成故障注入与收敛压测（分区、乱序、重启）
 
-### Phase 1：双写（Redis + Gossip）
+### Phase 1：一次性切换
 
-- 所有 registry 更新同时写入 Redis 与 gossip state machine
-- 增加一致性对账指标（slot map hash、member hash）
+- 默认 `registry.backend` 改为 `gossip`
+- `README` 与 `integration` 默认流程移除“registry Redis 必须可达”的前置条件
+- `start` 作为唯一建群入口，`join` 作为唯一入群入口
+- 不支持混部：切换窗口内必须统一到 gossip 方案，不允许 registry backend 混跑
 
-### Phase 2：双读（优先 Gossip）
+### Phase 2：收敛与清理
 
-- 读路径优先 gossip，本地异常时回退 Redis
-- 跑全套 integration + 注入故障测试
-
-### Phase 3：移除 Redis 前置依赖
-
-- README / integration 默认不再要求 registry Redis
-- Redis backend 保留为可选兼容模式（非默认）
+- 打通 `archive.init_cluster` + `rimio-adm sync-archive` 写闸门流程
+- 在验证稳定后，将文档与配置示例全面收敛到 gossip-only 推荐路径
 
 ---
 
@@ -261,12 +401,16 @@ registry:
 1. **CRDT 属性测试**
    - 交换律、结合律、幂等性
 2. **故障注入测试**
-   - 网络分区、单节点重启、消息乱序、重复消息
+   - 网络分区、单节点重启、消息乱序、重复消息、memberlist 节点 flap
 3. **收敛时延测试**
    - N=3/5 集群下 slot map 收敛时间 P50/P99
 4. **写安全测试**
    - 验证 `slot_epoch` fencing 防止旧主提交
-5. **兼容回归**
+5. **CLI/配置约束测试**
+   - `start`/`join` 参数校验、`join` 无 `--conf`、参数与 registry 一致性校验、同名活跃节点拒绝、`cluster://` URL 解析
+6. **写闸门测试**
+   - 配置 `archive.init_cluster` 后仅允许 `health/nodes/list/get/head`，拒绝 `put/delete/internal write`；`sync-archive` 后恢复写入
+7. **兼容回归**
    - 现有 API 与 S3 integration 不回归
 
 建议补充 TLA+ 模型检查：
@@ -277,14 +421,36 @@ registry:
 
 ---
 
+## 本期延后 TODO（后续迭代）
+
+以下能力明确记录为 TODO，本期先不实现：
+
+1. `write_gate` 状态变更的原子化语义（CAS/版本冲突裁决）。
+2. `rimio-adm sync-archive` 的完整恢复语义（部分成功、断点续传、幂等重试）。
+3. `cluster://` 的完整语法与错误模型（含 IPv6、重复节点、非法端口等）。
+4. `--force-takeover` 并发争抢时的胜者裁决与冷却窗口策略。
+
+本期策略：
+
+- 优先实现主流程可用性（start/join、registry 收敛、写闸门、基础 takeover）。
+- 对上述 TODO 场景采用 best-effort 行为，必要时通过运维介入恢复。
+
+---
+
 ## 风险与缓解
 
 1. **风险：分区期间视图不一致导致路由抖动**
    - 缓解：读本地快照 + 写入携带 epoch fencing + anti-entropy 加速
 2. **风险：Gossip 参数不当导致误判故障**
-   - 缓解：默认保守超时，暴露观测指标后再调优
-3. **风险：双写阶段状态漂移**
-   - 缓解：hash 对账 + 自动告警 + 可回退 Redis 主读
+   - 缓解：基于 memberlist 推荐参数起步，按生产指标迭代调优
+3. **风险：一次性切换后回退复杂度提升**
+   - 缓解：按整集群版本回滚，不采用混部回退路径
+4. **风险：第三方依赖升级带来行为变化**
+   - 缓解：锁定版本区间、升级前跑故障注入回归测试
+5. **风险：配置缺失导致节点无法入群**
+   - 缓解：将 registry bootstrap state 作为唯一配置真相源，并在 `join` 入口执行严格一致性校验
+6. **风险：误用 `--force-takeover` 导致脑裂窗口扩大**
+   - 缓解：限制仅对 `Suspect` 生效 + 心跳年龄门槛 + 审计日志 + 指标告警
 
 ---
 
@@ -294,13 +460,16 @@ registry:
 2. 单节点故障后，`fail_timeout` 内完成主副本收敛，写路径可恢复。
 3. 网络分区恢复后，slot map 在 `2 * full_sync_interval` 内收敛。
 4. 发生主切换后，旧主无法以过期 `slot_epoch` 写入成功。
-5. README 与 integration 默认流程不再要求“registry Redis 必须可达”。
+5. `join` 命令不依赖本地 `config.yaml`，且在参数提供时与 registry 配置严格一致。
+6. `start/join` 命令满足节点名唯一约束，且 `cluster://` 地址可用任一 seed 入群。
+7. 配置 `archive.init_cluster` 时，集群默认拒绝写，`rimio-adm sync-archive` 后开放写入。
+8. README 与 integration 默认流程不再要求“registry Redis 必须可达”。
+9. 在 `write_gate=ClosedByInitCluster` 时，API 访问行为严格符合“读白名单/写拒绝”约束与统一错误码。
 
 ---
 
 ## 开放问题
 
 1. `slot_epoch` 与现有 `generation` 的边界是否需要统一版本向量表达？
-2. Gossip 传输层首版采用 HTTP 复用还是独立 UDP/TCP bus？
-3. 是否保留 etcd backend 作为长期选项，还是与 Redis 一并降级为兼容模式？
-
+2. memberlist 传输层首版采用何种配置（仅内网 TCP，还是开启加密/鉴权）？
+3. `--force-takeover` 是否需要增加二次确认机制（如 `--confirm-epoch`）以降低误操作？
