@@ -70,6 +70,14 @@ These cases define contract placeholders for the planned RFC0008 start/join + go
 
 They are excluded from `run_all.py` by default until features land.
 
+Notes:
+
+- `016/017/019` are active CLI contract probes that validate either:
+  - current pre-implementation behavior (subcommand missing), or
+  - future argument/state validation behavior once command is implemented.
+- `018` runs a real API baseline (health/nodes/get/put/delete) and is ready to
+  tighten into write-gate assertions after `write_gate` controls are wired.
+
 Enable with either:
 
 - `RIMIO_ENABLE_RFC0008_IT=1 uv run --project integration integration/run_all.py ...`

@@ -1,27 +1,55 @@
 #!/usr/bin/env python3
-"""[019] RFC0008 contract placeholder: --force-takeover guardrails.
+"""[019] RFC0008 contract probe: --force-takeover guardrails.
 
-Expected RFC behavior:
-- only effective for same-node Suspect state
-- never overrides Alive state
-- requires heartbeat-age threshold
-- emits audit log on takeover
-
-Current implementation does not expose `rimio join --force-takeover` yet.
+Coverage strategy:
+- If `rimio join` is missing, assert subcommand-not-implemented contract.
+- If implemented later, verify unknown node + force-takeover still fails with
+  explicit argument/state validation error.
 """
 
 from __future__ import annotations
 
-from _harness import build_case_parser
+from pathlib import Path
+
+from _harness import DEFAULT_BINARY, build_case_parser
+from _rfc0008_probe import ensure_binary, is_subcommand_unimplemented, joined_output, run_cli
 
 
 def main() -> None:
     parser = build_case_parser("019", "RFC0008 force-takeover contract placeholder")
-    parser.parse_args()
+    args = parser.parse_args()
 
-    print("[019] SKIP (placeholder): force-takeover flow not implemented yet")
+    binary = Path(args.binary) if args.binary else DEFAULT_BINARY
+    ensure_binary(binary, build_if_missing=args.build_if_missing)
+
+    result = run_cli(
+        binary,
+        [
+            "join",
+            "cluster://127.0.0.1:65535",
+            "--node",
+            "node-not-in-bootstrap",
+            "--force-takeover",
+        ],
+        timeout=15.0,
+    )
+
+    if is_subcommand_unimplemented(result, "join"):
+        print("[019] PASS (pre-implementation): join subcommand not yet available")
+        return
+
+    if result.returncode == 0:
+        raise AssertionError("[019] expected force-takeover guardrail failure, but command succeeded")
+
+    output = joined_output(result).lower()
+    if "node" not in output and "bootstrap" not in output and "takeover" not in output:
+        raise AssertionError(
+            "[019] expected explicit node/takeover guardrail failure.\n"
+            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+        )
+
+    print("[019] PASS")
 
 
 if __name__ == "__main__":
     main()
-

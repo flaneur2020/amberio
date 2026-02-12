@@ -1,26 +1,45 @@
 #!/usr/bin/env python3
-"""[017] RFC0008 contract placeholder: cluster:// registry URL semantics.
+"""[017] RFC0008 contract probe: cluster:// registry URL parse semantics.
 
-Expected RFC behavior:
-- accepts cluster://seed1:8400,seed2:8400
-- succeeds if any seed is reachable
-- invalid URL forms return explicit argument errors
-
-Current implementation does not expose `rimio join` yet.
+Coverage strategy:
+- If `rimio join` is missing, assert subcommand-not-implemented contract.
+- If implemented, pass malformed cluster URL and assert explicit parse/arg error.
 """
 
 from __future__ import annotations
 
-from _harness import build_case_parser
+from pathlib import Path
+
+from _harness import DEFAULT_BINARY, build_case_parser
+from _rfc0008_probe import ensure_binary, is_subcommand_unimplemented, joined_output, run_cli
 
 
 def main() -> None:
     parser = build_case_parser("017", "RFC0008 cluster:// URL contract placeholder")
-    parser.parse_args()
+    args = parser.parse_args()
 
-    print("[017] SKIP (placeholder): rimio join command not implemented yet")
+    binary = Path(args.binary) if args.binary else DEFAULT_BINARY
+    ensure_binary(binary, build_if_missing=args.build_if_missing)
+
+    malformed_url = "cluster://seed1:8400,broken-host:::"
+    result = run_cli(binary, ["join", malformed_url, "--node", "node-x"], timeout=15.0)
+
+    if is_subcommand_unimplemented(result, "join"):
+        print("[017] PASS (pre-implementation): join subcommand not yet available")
+        return
+
+    if result.returncode == 0:
+        raise AssertionError("[017] expected malformed cluster URL to fail, but it succeeded")
+
+    output = joined_output(result).lower()
+    if "cluster" not in output and "url" not in output and "invalid" not in output:
+        raise AssertionError(
+            "[017] expected explicit URL/argument parse error.\n"
+            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+        )
+
+    print("[017] PASS")
 
 
 if __name__ == "__main__":
     main()
-
