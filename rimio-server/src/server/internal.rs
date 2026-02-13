@@ -17,9 +17,10 @@ use rimio_core::{
     InternalGetHeadOperationOutcome, InternalGetHeadOperationRequest,
     InternalGetPartOperationOutcome, InternalGetPartOperationRequest,
     InternalPutHeadOperationRequest, InternalPutPartOperationRequest, MetaAddLearnerRequest,
-    MetaAppendEntriesRequest, MetaInstallSnapshotRequest, MetaVoteRequest, MetaWriteRequest,
-    RimError, handle_global_add_learner, handle_global_append_entries, handle_global_client_write,
-    handle_global_install_snapshot, handle_global_vote,
+    MetaAppendEntriesRequest, MetaInstallSnapshotRequest, MetaPromoteVoterRequest, MetaVoteRequest,
+    MetaWriteRequest, RimError, handle_global_add_learner, handle_global_append_entries,
+    handle_global_client_write, handle_global_install_snapshot, handle_global_promote_voter,
+    handle_global_vote,
 };
 use std::sync::Arc;
 
@@ -426,6 +427,15 @@ pub(crate) async fn v1_internal_meta_add_learner(
     Json(request): Json<MetaAddLearnerRequest>,
 ) -> impl IntoResponse {
     match handle_global_add_learner(request).await {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(error) => response_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+    }
+}
+
+pub(crate) async fn v1_internal_meta_promote_voter(
+    Json(request): Json<MetaPromoteVoterRequest>,
+) -> impl IntoResponse {
+    match handle_global_promote_voter(request).await {
         Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
         Err(error) => response_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
     }
