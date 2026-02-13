@@ -40,6 +40,7 @@ use serde::de::DeserializeOwned;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::io::Cursor;
@@ -58,6 +59,7 @@ const URI_RAFT_VOTE: &str = "/internal/v1/meta/raft-vote";
 const URI_RAFT_APPEND: &str = "/internal/v1/meta/raft-append";
 const URI_RAFT_SNAPSHOT: &str = "/internal/v1/meta/raft-snapshot";
 const URI_ADD_LEARNER: &str = "/internal/v1/meta/add-learner";
+const URI_PROMOTE_VOTER: &str = "/internal/v1/meta/promote-voter";
 const URI_CLIENT_WRITE: &str = "/internal/v1/meta/write";
 
 const META_KEY_LAST_APPLIED_LOG: &str = "__meta:last_applied_log";
@@ -91,6 +93,8 @@ pub type MetaInstallSnapshotResult =
 pub type MetaClientWriteResult =
     std::result::Result<ClientWriteResponse<MetaTypeConfig>, MetaRaftError<MetaClientWriteError>>;
 pub type MetaAddLearnerResult =
+    std::result::Result<ClientWriteResponse<MetaTypeConfig>, MetaRaftError<MetaClientWriteError>>;
+pub type MetaChangeMembershipResult =
     std::result::Result<ClientWriteResponse<MetaTypeConfig>, MetaRaftError<MetaClientWriteError>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +140,17 @@ pub struct MetaAddLearnerRequest {
     pub address: String,
     #[serde(default)]
     pub blocking: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaPromoteVoterRequest {
+    pub node_id: String,
+    #[serde(default = "default_retain_true")]
+    pub retain: bool,
+}
+
+fn default_retain_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -1069,6 +1084,33 @@ pub async fn handle_global_add_learner(
         .await)
 }
 
+pub async fn handle_global_promote_voter(
+    request: MetaPromoteVoterRequest,
+) -> Result<MetaChangeMembershipResult> {
+    let node = get_global_node()?;
+
+    let node_name = request.node_id.trim();
+    if node_name.is_empty() {
+        return Err(MetaError::Config(
+            "promote_voter requires non-empty node_id".to_string(),
+        ));
+    }
+
+    let raft_id = node_name_to_raft_id(node_name);
+
+    let metrics = node.raft.metrics();
+    let snapshot = metrics.borrow().clone();
+
+    let mut voters = snapshot
+        .membership_config
+        .membership()
+        .voter_ids()
+        .collect::<BTreeSet<_>>();
+    voters.insert(raft_id);
+
+    Ok(node.raft.change_membership(voters, request.retain).await)
+}
+
 pub async fn handle_global_client_write(
     request: MetaWriteRequest,
 ) -> Result<MetaClientWriteResult> {
@@ -1284,13 +1326,18 @@ impl MetaKv {
     }
 
     async fn join_existing_cluster(&self, seeds: Vec<String>) -> Result<()> {
-        let request = {
+        let add_learner_request = {
             let local = self.local_node.read().await;
             MetaAddLearnerRequest {
                 node_id: local.node_id.clone(),
                 address: local.address.clone(),
                 blocking: false,
             }
+        };
+
+        let promote_request = MetaPromoteVoterRequest {
+            node_id: add_learner_request.node_id.clone(),
+            retain: true,
         };
 
         let mut candidates = seeds;
@@ -1301,11 +1348,21 @@ impl MetaKv {
 
             for candidate in candidates.clone() {
                 match self
-                    .send_remote_add_learner(candidate.as_str(), &request)
+                    .send_remote_add_learner(candidate.as_str(), &add_learner_request)
                     .await
                 {
                     Ok(()) => {
-                        tracing::info!(target = %candidate, "metakv raft joined cluster");
+                        tracing::info!(target = %candidate, "metakv raft added learner");
+
+                        self.schedule_promote_joined_node_to_voter(
+                            candidates.clone(),
+                            promote_request.clone(),
+                        );
+
+                        tracing::info!(
+                            target = %candidate,
+                            "metakv raft joined cluster as learner; voter promotion scheduled"
+                        );
                         return Ok(());
                     }
                     Err(AddLearnerError::ForwardToLeader(Some(addr))) => {
@@ -1334,6 +1391,108 @@ impl MetaKv {
                 last_error.as_str()
             }
         )))
+    }
+
+    fn schedule_promote_joined_node_to_voter(
+        &self,
+        candidates: Vec<String>,
+        request: MetaPromoteVoterRequest,
+    ) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+
+            if let Err(error) = this
+                .promote_joined_node_to_voter(candidates, request.clone())
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    node_id = %request.node_id,
+                    "metakv voter promotion task failed"
+                );
+            }
+        });
+    }
+
+    async fn promote_joined_node_to_voter(
+        &self,
+        mut candidates: Vec<String>,
+        request: MetaPromoteVoterRequest,
+    ) -> Result<()> {
+        let target_raft_id = node_name_to_raft_id(request.node_id.as_str());
+        let mut last_error = String::new();
+
+        for _attempt in 0..40 {
+            if self.is_raft_voter(target_raft_id) {
+                tracing::info!(
+                    node_id = %request.node_id,
+                    "metakv raft voter promotion already visible in local metrics"
+                );
+                return Ok(());
+            }
+
+            let mut leader_hint: Option<String> = None;
+
+            for candidate in candidates.clone() {
+                match self
+                    .send_remote_promote_voter(candidate.as_str(), &request)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            target = %candidate,
+                            node_id = %request.node_id,
+                            "metakv raft promoted node to voter"
+                        );
+                        return Ok(());
+                    }
+                    Err(PromoteVoterError::ForwardToLeader(Some(addr))) => {
+                        leader_hint = Some(addr);
+                    }
+                    Err(PromoteVoterError::InProgress) => {
+                        tracing::info!(
+                            target = %candidate,
+                            node_id = %request.node_id,
+                            "metakv raft voter promotion is already in progress"
+                        );
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        last_error = error.to_string();
+                    }
+                }
+            }
+
+            if let Some(leader) = leader_hint {
+                if !candidates.iter().any(|candidate| candidate == &leader) {
+                    candidates.insert(0, leader);
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        Err(MetaError::Internal(format!(
+            "failed to promote joined node '{}' to voter: {}",
+            request.node_id,
+            if last_error.is_empty() {
+                "unknown error"
+            } else {
+                last_error.as_str()
+            }
+        )))
+    }
+
+    fn is_raft_voter(&self, node_id: MetaNodeId) -> bool {
+        let metrics = self.raft.metrics();
+        let snapshot = metrics.borrow().clone();
+
+        snapshot
+            .membership_config
+            .membership()
+            .voter_ids()
+            .any(|voter| voter == node_id)
     }
 
     fn active_raft_member_ids(&self) -> HashSet<MetaNodeId> {
@@ -1383,17 +1542,12 @@ impl MetaKv {
             candidates = self.write_forward_candidates(None).await;
         }
 
-        let mut visited = HashSet::new();
         let mut last_error = String::new();
 
         for _round in 0..8 {
             let mut next_leader_hint: Option<String> = None;
 
             for candidate in candidates.clone() {
-                if !visited.insert(candidate.clone()) {
-                    continue;
-                }
-
                 match self
                     .send_remote_client_write(candidate.as_str(), &request)
                     .await
@@ -1413,12 +1567,20 @@ impl MetaKv {
                 refreshed.insert(0, addr);
             }
 
-            refreshed.retain(|candidate| !visited.contains(candidate));
             if refreshed.is_empty() {
-                break;
+                refreshed = candidates;
             }
 
-            candidates = refreshed;
+            let mut unique = Vec::new();
+            let mut seen = HashSet::new();
+            for candidate in refreshed {
+                if seen.insert(candidate.clone()) {
+                    unique.push(candidate);
+                }
+            }
+
+            candidates = unique;
+            tokio::time::sleep(Duration::from_millis(120)).await;
         }
 
         Err(MetaError::Internal(format!(
@@ -1511,6 +1673,28 @@ impl MetaKv {
         }
     }
 
+    async fn send_remote_promote_voter(
+        &self,
+        target: &str,
+        request: &MetaPromoteVoterRequest,
+    ) -> std::result::Result<(), PromoteVoterError> {
+        let payload: MetaChangeMembershipResult =
+            post_json(&self.client, target, URI_PROMOTE_VOTER, request)
+                .await
+                .map_err(PromoteVoterError::Http)?;
+
+        match payload {
+            Ok(_response) => Ok(()),
+            Err(MetaRaftError::APIError(MetaClientWriteError::ForwardToLeader(forward))) => Err(
+                PromoteVoterError::ForwardToLeader(forward.leader_node.map(|node| node.addr)),
+            ),
+            Err(MetaRaftError::APIError(MetaClientWriteError::ChangeMembershipError(
+                openraft::error::ChangeMembershipError::InProgress(_),
+            ))) => Err(PromoteVoterError::InProgress),
+            Err(error) => Err(PromoteVoterError::Remote(error.to_string())),
+        }
+    }
+
     async fn send_remote_client_write(
         &self,
         target: &str,
@@ -1538,6 +1722,21 @@ enum AddLearnerError {
 
     #[error("forward to leader: {0:?}")]
     ForwardToLeader(Option<String>),
+
+    #[error("{0}")]
+    Remote(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum PromoteVoterError {
+    #[error("{0}")]
+    Http(MetaError),
+
+    #[error("forward to leader: {0:?}")]
+    ForwardToLeader(Option<String>),
+
+    #[error("membership reconfiguration in progress")]
+    InProgress,
 
     #[error("{0}")]
     Remote(String),
