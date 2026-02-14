@@ -3,9 +3,9 @@
 //! Provides a trait-based abstraction for different backend implementations
 //! (etcd, Redis, etc.)
 
+pub mod embed;
 pub mod etcd;
 pub mod factory;
-pub mod gossip_memberlist;
 pub mod redis;
 
 use crate::error::Result;

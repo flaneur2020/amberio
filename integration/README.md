@@ -61,7 +61,7 @@ uv run --project integration integration/008_tla_trace_check.py \
 
 ## RFC0008 gated cases (016-019)
 
-These cases define contract placeholders for the planned RFC0008 start/join + gossip flow:
+These cases define contract placeholders for the planned RFC0008 start/join + embed flow:
 
 - `016_rfc0008_join_rejects_local_conf_dependence.py`
 - `017_rfc0008_cluster_url_parse_contract.py`

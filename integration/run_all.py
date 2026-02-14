@@ -62,7 +62,7 @@ def main() -> None:
     parser.add_argument(
         "--include-rfc0008",
         action="store_true",
-        help="Include 016-021 RFC0008 start/join/gossip integration cases",
+        help="Include 016-021 RFC0008 start/join/embed integration cases",
     )
     args = parser.parse_args()
 

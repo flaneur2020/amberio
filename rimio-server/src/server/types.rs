@@ -194,7 +194,7 @@ pub(crate) struct InternalBootstrapResponse {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct InternalGossipSeedsResponse {
+pub(crate) struct InternalEmbedSeedsResponse {
     pub(crate) seeds: Vec<String>,
 }
 

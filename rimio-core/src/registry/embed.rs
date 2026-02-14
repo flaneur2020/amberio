@@ -49,12 +49,12 @@ fn is_health_expired(last_updated: chrono::DateTime<chrono::Utc>) -> bool {
     chrono::Utc::now().signed_duration_since(last_updated) > chrono::Duration::seconds(60)
 }
 
-pub struct GossipMemberlistRegistry {
+pub struct EmbedRegistry {
     namespace: String,
     kv: MetaKv,
 }
 
-impl GossipMemberlistRegistry {
+impl EmbedRegistry {
     pub async fn new(
         namespace: &str,
         node_id: &str,
@@ -86,7 +86,7 @@ impl GossipMemberlistRegistry {
 }
 
 #[async_trait]
-impl Registry for GossipMemberlistRegistry {
+impl Registry for EmbedRegistry {
     async fn register_node(&self, node: &NodeInfo) -> Result<()> {
         if node.group_id.trim() != self.namespace {
             return Err(RimError::Config(format!(

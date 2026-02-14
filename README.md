@@ -46,15 +46,14 @@ cargo build --release -p rimio-server --bin rimio
 mkdir -p demo/node1/disk demo/node2/disk demo/node3/disk
 ```
 
-3) Create `config.yaml` (simple example):
+3) Create `config.yaml` (recommended embedded raft registry):
 
 ```bash
 cat > config.yaml <<'EOF'
 registry:
-  backend: gossip
+  backend: embed
   namespace: local-cluster-001
-  gossip:
-    transport: "internal_http"
+  embed:
     seeds:
       - "127.0.0.1:19080"
 

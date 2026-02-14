@@ -11,7 +11,7 @@ use rimio_core::{
     InternalGetHeadOperation, InternalGetPartOperation, InternalPutHeadOperation,
     InternalPutPartOperation, ListBlobsOperation, Node, NodeInfo, PartStore, PutBlobArchiveWriter,
     PutBlobOperation, ReadBlobOperation, RedisArchiveStore, Registry, Result, RimError,
-    S3ArchiveStore, clear_global_gossip_ingress, set_default_s3_archive_store,
+    S3ArchiveStore, clear_global_embed_runtime, set_default_s3_archive_store,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,7 +30,7 @@ use external::{
 };
 use internal::{
     internal_get_head, internal_get_part, internal_put_head, internal_put_part,
-    v1_internal_cluster_bootstrap, v1_internal_cluster_gossip_seeds, v1_internal_heal_heads,
+    v1_internal_cluster_bootstrap, v1_internal_cluster_embed_seeds, v1_internal_heal_heads,
     v1_internal_heal_repair, v1_internal_heal_slotlets, v1_internal_meta_add_learner,
     v1_internal_meta_promote_voter, v1_internal_meta_raft_append, v1_internal_meta_raft_snapshot,
     v1_internal_meta_raft_vote, v1_internal_meta_write,
@@ -225,8 +225,8 @@ pub async fn run_server(config: RuntimeConfig, registry: Arc<dyn Registry>) -> R
             get(v1_internal_cluster_bootstrap),
         )
         .route(
-            "/internal/v1/cluster/gossip-seeds",
-            get(v1_internal_cluster_gossip_seeds),
+            "/internal/v1/cluster/embed-seeds",
+            get(v1_internal_cluster_embed_seeds),
         )
         .route(
             "/internal/v1/meta/raft-vote",
@@ -259,7 +259,7 @@ pub async fn run_server(config: RuntimeConfig, registry: Arc<dyn Registry>) -> R
         .await
         .map_err(|error| RimError::Http(error.to_string()));
 
-    clear_global_gossip_ingress();
+    clear_global_embed_runtime();
 
     serve_result?;
 

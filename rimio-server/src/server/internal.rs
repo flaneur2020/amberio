@@ -1,7 +1,7 @@
 use super::{
     HealHeadItem, HealHeadsRequest, HealHeadsResponse, HealRepairRequest, HealRepairResponse,
     HealSlotlet, HealSlotletsQuery, HealSlotletsResponse, InternalBootstrapResponse,
-    InternalGossipSeedsResponse, InternalHeadApplyRequest, InternalHeadApplyResponse,
+    InternalEmbedSeedsResponse, InternalHeadApplyRequest, InternalHeadApplyResponse,
     InternalHeadResponse, InternalPartPutResponse, InternalPartQuery, InternalPathQuery,
     ServerState, normalize_blob_path, response_error,
 };
@@ -377,7 +377,7 @@ pub(crate) async fn v1_internal_cluster_bootstrap(
         .into_response()
 }
 
-pub(crate) async fn v1_internal_cluster_gossip_seeds(
+pub(crate) async fn v1_internal_cluster_embed_seeds(
     State(state): State<Arc<ServerState>>,
 ) -> impl IntoResponse {
     let nodes = match super::current_nodes(&state).await {
@@ -393,7 +393,7 @@ pub(crate) async fn v1_internal_cluster_gossip_seeds(
     seeds.sort();
     seeds.dedup();
 
-    (StatusCode::OK, Json(InternalGossipSeedsResponse { seeds })).into_response()
+    (StatusCode::OK, Json(InternalEmbedSeedsResponse { seeds })).into_response()
 }
 
 pub(crate) async fn v1_internal_meta_raft_vote(
