@@ -40,12 +40,12 @@ Distributed write coordination and node lifecycle management.
 - [ ] Health checking and failure detection
 
 - [x] RFC0010 drafted for single-port memberlist transport
-- [x] Added internal bootstrap and gossip seed discovery endpoints
+- [x] Added internal bootstrap and embed seed discovery endpoints
 - [x] Implement memberlist custom internal transport (`Transport`)
-- [x] Wire gossip startup sequence to single-port flow
-- [x] Remove user-facing `registry.gossip.bind_addr/advertise_addr`
-- [x] Extract `rimio-meta` crate for gossip+CRDT MetaKv runtime
-- [x] Decouple registry gossip path from direct memberlist internals
+- [x] Wire embedded registry startup sequence to single-port flow
+- [x] Remove user-facing dedicated registry bind/advertise overrides
+- [x] Extract `rimio-meta` crate for embedded raft MetaKv runtime
+- [x] Decouple registry embed path from direct memberlist internals
 
 ### 📋 Phase 3: Anti-Entropy
 

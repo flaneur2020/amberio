@@ -48,7 +48,7 @@ def wait_until(predicate, timeout_sec: float, interval_sec: float = 0.2) -> None
 
 
 def main() -> None:
-    parser = build_case_parser("022", "RFC0010 single-port gossip start/join")
+    parser = build_case_parser("022", "RFC0010 single-port embed start/join")
     args = parser.parse_args()
 
     binary = Path(args.binary) if args.binary else DEFAULT_BINARY
@@ -84,10 +84,9 @@ def main() -> None:
             "\n".join(
                 [
                     "registry:",
-                    "  backend: gossip",
+                    "  backend: embed",
                     f"  namespace: {namespace}",
-                    "  gossip:",
-                    '    transport: "internal_http"',
+                    "  embed:",
                     "    seeds: []",
                     "",
                     "initial_cluster:",

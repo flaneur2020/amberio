@@ -59,7 +59,7 @@ pub struct RegistryConfig {
     pub namespace: Option<String>,
     pub etcd: Option<EtcdConfig>,
     pub redis: Option<RedisConfig>,
-    pub gossip: Option<GossipConfig>,
+    pub embed: Option<EmbedConfig>,
 }
 
 impl RegistryConfig {
@@ -76,7 +76,7 @@ impl RegistryConfig {
 pub enum RegistryBackend {
     Etcd,
     Redis,
-    Gossip,
+    Embed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,15 +92,9 @@ pub struct RedisConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GossipConfig {
-    #[serde(default = "default_gossip_transport")]
-    pub transport: String,
+pub struct EmbedConfig {
     #[serde(default)]
     pub seeds: Vec<String>,
-}
-
-fn default_gossip_transport() -> String {
-    "internal_http".to_string()
 }
 
 fn default_redis_pool_size() -> usize {
@@ -282,17 +276,18 @@ impl Config {
 
                 builder.backend("redis").redis_url(url)
             }
-            RegistryBackend::Gossip => {
-                let gossip = self.registry.gossip.clone().unwrap_or(GossipConfig {
-                    transport: default_gossip_transport(),
-                    seeds: Vec::new(),
-                });
+            RegistryBackend::Embed => {
+                let embed = self
+                    .registry
+                    .embed
+                    .clone()
+                    .unwrap_or(EmbedConfig { seeds: Vec::new() });
 
                 let mut builder = builder
-                    .backend("gossip")
-                    .gossip_transport(gossip.transport)
-                    .gossip_node_id(node_id.to_string())
-                    .gossip_seeds(gossip.seeds);
+                    .backend("embed")
+                    .embed_transport("openraft")
+                    .embed_node_id(node_id.to_string())
+                    .embed_seeds(embed.seeds);
 
                 if let Some(node) = self
                     .initial_cluster
@@ -301,7 +296,7 @@ impl Config {
                     .find(|node| node.node_id == node_id)
                 {
                     if !node.bind_addr.trim().is_empty() {
-                        builder = builder.gossip_bind_addr(node.bind_addr.clone());
+                        builder = builder.embed_bind_addr(node.bind_addr.clone());
                     }
 
                     if let Some(advertise_addr) = node
@@ -310,7 +305,7 @@ impl Config {
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
                     {
-                        builder = builder.gossip_advertise_addr(advertise_addr.to_string());
+                        builder = builder.embed_advertise_addr(advertise_addr.to_string());
                     }
                 }
 

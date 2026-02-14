@@ -81,7 +81,7 @@ struct JoinInvocation {
 
 #[derive(Debug, Clone)]
 enum JoinRegistryTarget {
-    Gossip { seeds: Vec<String> },
+    Embed { seeds: Vec<String> },
     Redis { url: String },
     Etcd { endpoints: Vec<String> },
 }
@@ -173,7 +173,7 @@ fn parse_registry_url(url: &str) -> std::result::Result<JoinRegistryTarget, Stri
     }
 
     if let Some(seeds_raw) = trimmed.strip_prefix("cluster://") {
-        return Ok(JoinRegistryTarget::Gossip {
+        return Ok(JoinRegistryTarget::Embed {
             seeds: parse_cluster_seeds(seeds_raw)?,
         });
     }
@@ -205,13 +205,12 @@ fn registry_config_for_join_target(
     _join: &JoinInvocation,
 ) -> std::result::Result<config::RegistryConfig, String> {
     match target {
-        JoinRegistryTarget::Gossip { seeds } => Ok(config::RegistryConfig {
-            backend: config::RegistryBackend::Gossip,
+        JoinRegistryTarget::Embed { seeds } => Ok(config::RegistryConfig {
+            backend: config::RegistryBackend::Embed,
             namespace: Some("default".to_string()),
             etcd: None,
             redis: None,
-            gossip: Some(config::GossipConfig {
-                transport: "internal_http".to_string(),
+            embed: Some(config::EmbedConfig {
                 seeds: seeds.clone(),
             }),
         }),
@@ -223,7 +222,7 @@ fn registry_config_for_join_target(
                 url: url.clone(),
                 pool_size: 8,
             }),
-            gossip: None,
+            embed: None,
         }),
         JoinRegistryTarget::Etcd { endpoints } => Ok(config::RegistryConfig {
             backend: config::RegistryBackend::Etcd,
@@ -232,16 +231,16 @@ fn registry_config_for_join_target(
                 endpoints: endpoints.clone(),
             }),
             redis: None,
-            gossip: None,
+            embed: None,
         }),
     }
 }
 
 fn should_check_active_node_conflict(target: &JoinRegistryTarget) -> bool {
-    !matches!(target, JoinRegistryTarget::Gossip { .. })
+    !matches!(target, JoinRegistryTarget::Embed { .. })
 }
 
-async fn fetch_bootstrap_state_from_gossip_seeds(
+async fn fetch_bootstrap_state_from_embed_seeds(
     seeds: &[String],
 ) -> std::result::Result<(String, rimio_core::ClusterState), String> {
     if seeds.is_empty() {
@@ -294,7 +293,7 @@ async fn fetch_bootstrap_state_from_gossip_seeds(
     }
 
     Err(last_error.unwrap_or_else(|| {
-        "all gossip seeds are unreachable while reading bootstrap state".to_string()
+        "all embed seeds are unreachable while reading bootstrap state".to_string()
     }))
 }
 
@@ -473,15 +472,15 @@ async fn run_join(join: JoinInvocation) {
     let mut preflight_registry: Option<std::sync::Arc<dyn rimio_core::Registry>> = None;
 
     let bootstrap_state: rimio_core::ClusterState = match &registry_target {
-        JoinRegistryTarget::Gossip { seeds } => {
-            match fetch_bootstrap_state_from_gossip_seeds(seeds).await {
+        JoinRegistryTarget::Embed { seeds } => {
+            match fetch_bootstrap_state_from_embed_seeds(seeds).await {
                 Ok((namespace, state)) => {
                     cfg.registry.namespace = Some(namespace);
                     state
                 }
                 Err(message) => {
                     tracing::error!(
-                        "failed to read bootstrap state from gossip seeds ({}): {}",
+                        "failed to read bootstrap state from embed seeds ({}): {}",
                         join.registry_url,
                         message
                     );
@@ -591,7 +590,7 @@ async fn run_join(join: JoinInvocation) {
 
     if should_check_active_node_conflict(&registry_target) {
         let registry =
-            preflight_registry.expect("preflight registry must exist for non-gossip target");
+            preflight_registry.expect("preflight registry must exist for non-embed target");
 
         let existing_nodes = match registry.get_nodes().await {
             Ok(nodes) => nodes,

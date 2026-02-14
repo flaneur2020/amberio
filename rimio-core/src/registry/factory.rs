@@ -1,6 +1,4 @@
-use super::{
-    Registry, etcd::EtcdRegistry, gossip_memberlist::GossipMemberlistRegistry, redis::RedisRegistry,
-};
+use super::{Registry, embed::EmbedRegistry, etcd::EtcdRegistry, redis::RedisRegistry};
 use crate::{Result, RimError};
 use std::sync::Arc;
 
@@ -8,13 +6,13 @@ use std::sync::Arc;
 pub struct RegistryBuilder {
     backend: Option<String>,
     namespace: Option<String>,
-    gossip_node_id: Option<String>,
-    gossip_transport: Option<String>,
+    embed_node_id: Option<String>,
+    embed_transport: Option<String>,
     etcd_endpoints: Option<Vec<String>>,
     redis_url: Option<String>,
-    gossip_bind_addr: Option<String>,
-    gossip_advertise_addr: Option<String>,
-    gossip_seeds: Option<Vec<String>>,
+    embed_bind_addr: Option<String>,
+    embed_advertise_addr: Option<String>,
+    embed_seeds: Option<Vec<String>>,
 }
 
 impl RegistryBuilder {
@@ -32,13 +30,13 @@ impl RegistryBuilder {
         self
     }
 
-    pub fn gossip_node_id(mut self, node_id: impl Into<String>) -> Self {
-        self.gossip_node_id = Some(node_id.into());
+    pub fn embed_node_id(mut self, node_id: impl Into<String>) -> Self {
+        self.embed_node_id = Some(node_id.into());
         self
     }
 
-    pub fn gossip_transport(mut self, transport: impl Into<String>) -> Self {
-        self.gossip_transport = Some(transport.into());
+    pub fn embed_transport(mut self, transport: impl Into<String>) -> Self {
+        self.embed_transport = Some(transport.into());
         self
     }
 
@@ -52,18 +50,18 @@ impl RegistryBuilder {
         self
     }
 
-    pub fn gossip_bind_addr(mut self, addr: impl Into<String>) -> Self {
-        self.gossip_bind_addr = Some(addr.into());
+    pub fn embed_bind_addr(mut self, addr: impl Into<String>) -> Self {
+        self.embed_bind_addr = Some(addr.into());
         self
     }
 
-    pub fn gossip_advertise_addr(mut self, addr: impl Into<String>) -> Self {
-        self.gossip_advertise_addr = Some(addr.into());
+    pub fn embed_advertise_addr(mut self, addr: impl Into<String>) -> Self {
+        self.embed_advertise_addr = Some(addr.into());
         self
     }
 
-    pub fn gossip_seeds(mut self, seeds: Vec<String>) -> Self {
-        self.gossip_seeds = Some(seeds);
+    pub fn embed_seeds(mut self, seeds: Vec<String>) -> Self {
+        self.embed_seeds = Some(seeds);
         self
     }
 
@@ -130,11 +128,11 @@ impl RegistryBuilder {
                 let registry = RedisRegistry::new(url, &namespace).await?;
                 Ok(Arc::new(registry))
             }
-            "gossip" => {
+            "embed" => {
                 let transport = self
-                    .gossip_transport
+                    .embed_transport
                     .as_deref()
-                    .unwrap_or("internal_http")
+                    .unwrap_or("openraft")
                     .trim()
                     .to_ascii_lowercase();
 
@@ -143,34 +141,34 @@ impl RegistryBuilder {
                     && transport != "openraft"
                 {
                     return Err(RimError::Config(format!(
-                        "unsupported gossip transport '{}': expected internal_http",
+                        "unsupported embed transport '{}': expected internal_http | openraft_http | openraft",
                         transport
                     )));
                 }
 
-                let bind_addr = self.gossip_bind_addr.as_deref().unwrap_or_default().trim();
+                let bind_addr = self.embed_bind_addr.as_deref().unwrap_or_default().trim();
                 if bind_addr.is_empty() {
                     return Err(RimError::Config(
-                        "gossip bind_addr is required for gossip backend".to_string(),
+                        "embed bind_addr is required for embed backend".to_string(),
                     ));
                 }
 
-                let node_id = self.gossip_node_id.as_deref().unwrap_or_default().trim();
+                let node_id = self.embed_node_id.as_deref().unwrap_or_default().trim();
                 if node_id.is_empty() {
                     return Err(RimError::Config(
-                        "gossip node_id is required for gossip backend".to_string(),
+                        "embed node_id is required for embed backend".to_string(),
                     ));
                 }
 
                 let advertise_addr = self
-                    .gossip_advertise_addr
+                    .embed_advertise_addr
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string);
 
                 let seeds = self
-                    .gossip_seeds
+                    .embed_seeds
                     .clone()
                     .unwrap_or_default()
                     .into_iter()
@@ -178,7 +176,7 @@ impl RegistryBuilder {
                     .filter(|seed| !seed.is_empty())
                     .collect();
 
-                let registry = GossipMemberlistRegistry::new(
+                let registry = EmbedRegistry::new(
                     &namespace,
                     node_id,
                     bind_addr,

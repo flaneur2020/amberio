@@ -172,7 +172,7 @@ fn canonical_transport(value: Option<&str>) -> String {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("internal_http")
+        .unwrap_or("openraft")
         .to_ascii_lowercase()
 }
 
@@ -183,7 +183,7 @@ fn validate_transport(value: Option<&str>) -> Result<()> {
     }
 
     Err(MetaError::Config(format!(
-        "unsupported gossip transport '{}': expected internal_http",
+        "unsupported embed transport '{}': expected internal_http | openraft_http | openraft",
         transport
     )))
 }
@@ -209,7 +209,7 @@ fn normalize_seed_list(seeds: Vec<String>) -> Result<Vec<String>> {
     let mut seen = HashSet::new();
 
     for seed in seeds {
-        let addr = normalize_address(seed.as_str(), "gossip seed")?;
+        let addr = normalize_address(seed.as_str(), "embed seed")?;
         if seen.insert(addr.clone()) {
             unique.push(addr);
         }
@@ -1143,13 +1143,13 @@ impl MetaKv {
         let node_id = options.node_id.trim().to_string();
         if node_id.is_empty() {
             return Err(MetaError::Config(
-                "gossip node_id cannot be empty".to_string(),
+                "embed node_id cannot be empty".to_string(),
             ));
         }
 
-        let bind_addr = normalize_address(options.bind_addr.as_str(), "gossip bind_addr")?;
+        let bind_addr = normalize_address(options.bind_addr.as_str(), "embed bind_addr")?;
         let advertise_addr = match options.advertise_addr.as_deref() {
-            Some(raw) if !raw.trim().is_empty() => normalize_address(raw, "gossip advertise_addr")?,
+            Some(raw) if !raw.trim().is_empty() => normalize_address(raw, "embed advertise_addr")?,
             _ => bind_addr.clone(),
         };
 

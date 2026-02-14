@@ -21,7 +21,7 @@ pub use rimio_meta::{
     MetaAddLearnerRequest, MetaAddLearnerResult, MetaAppendEntriesRequest, MetaAppendEntriesResult,
     MetaChangeMembershipResult, MetaClientWriteResult, MetaInstallSnapshotRequest,
     MetaInstallSnapshotResult, MetaPromoteVoterRequest, MetaVoteRequest, MetaVoteResult,
-    MetaWriteRequest, clear_global_node as clear_global_gossip_ingress, handle_global_add_learner,
+    MetaWriteRequest, clear_global_node as clear_global_embed_runtime, handle_global_add_learner,
     handle_global_append_entries, handle_global_client_write, handle_global_install_snapshot,
     handle_global_promote_voter, handle_global_vote,
 };
